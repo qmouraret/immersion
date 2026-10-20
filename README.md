@@ -137,3 +137,54 @@ cargo run -p tracker-core --example bench_sample # coût du recadrage
 1. Afficher les 6 points clés de BlazeFace (`detection_keypoints`) quand le détecteur tourne.
 2. `sample_roi` prend environ 4,5 ms pour le visage. Le paralléliser par lignes avec `std::thread::scope`
    (sans crate externe) et mesurer avec `bench_sample`.
+
+## Phase 2 — Pose 6DOF de la tête
+
+### Méthode
+
+1. **Alignement 3D** (Umeyama, SVD 3×3) du visage canonique MediaPipe (468 sommets, en cm)
+   sur les points mesurés : on obtient une rotation, une échelle (px/cm) et une translation.
+2. **Second passage robuste** : on écarte les 25 % de points les plus mal alignés
+   (bouche, sourcils…), puis on refait l'alignement.
+3. **Distance** : `Z = focale / échelle`. La focale vient du FOV horizontal (curseur, 66° par défaut : mesuré pour la caméra du MacBook Pro M1 Pro).
+4. **Correction de perspective** : l'alignement donne l'orientation *vue depuis la ligne de visée* ;
+   on la recompose avec la direction tête → caméra.
+
+### Conventions de sortie (point de vue de l'utilisateur)
+
+| Axe | Positif quand… |
+|---|---|
+| Lacet | on tourne la tête vers la droite |
+| Tangage | on lève la tête |
+| Roulis | on penche la tête vers l'épaule droite |
+| X / Y / Z | on se décale à droite / on monte / on recule |
+
+### Quoi observer
+
+- Les 3 axes dessinés sur le nez : rouge (gauche de la personne), vert (haut), bleu (avant).
+- **Recentrer** (bouton ou barre d'espace) : la pose courante devient le zéro.
+- **Vérifier la distance** avec un mètre : se placer à 60 cm de la caméra. Si la valeur affichée
+  est fausse, ajuster le FOV jusqu'à ce qu'elle soit juste. C'est un étalonnage manuel, que la
+  phase 5 automatisera.
+- **Vérifier les angles** : recentrer, puis tourner la tête de 90° (regarder un mur sur le côté).
+  Le lacet doit approcher 90°, même si le suivi devient difficile à ces angles.
+- **Erreur d'ajustement** : quelques pixels. Elle augmente avec les grimaces et les reflets.
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| `nalgebra` : `Vector3`, `Matrix3`, `Rotation3`, SVD | `tracker-core/src/pose.rs` |
+| Données générées dans une constante `[[f32; 3]; 468]` (incluse dans le binaire) | `canonical_face.rs` |
+| Tests par données synthétiques (pose connue → estimation → comparaison) | `pose::tests` |
+| Piège flottant : `acos` d'un cosinus calculé à 1,0000001 → `NaN` | `umeyama_retrouve_une_similitude` |
+| Canal de commandes UI → thread (`mpsc::channel`, `try_iter`) | `app/src/pipeline.rs` |
+| `std::mem::take` pour lire et réinitialiser un drapeau en une opération | `State::pose` |
+| `Box` dans un enum pour limiter la taille de toutes les variantes | `PipelineEvent::Frame` |
+
+### Exercices facultatifs
+
+1. `estimate` alloue deux `Vec` de 468 points à chaque image. Les garder dans une structure
+   réutilisée, comme le tampon de `FaceTracker`, et mesurer la différence (indice : elle sera faible ;
+   pourquoi ?).
+2. Afficher en rouge les points écartés par le second passage robuste.

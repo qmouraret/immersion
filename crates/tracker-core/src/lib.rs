@@ -5,11 +5,15 @@
 //! macOS et Windows.
 
 pub mod blazeface;
+pub mod canonical_face;
 pub mod face;
 mod frame;
+pub mod pose;
 mod roi;
+pub mod stats;
 pub mod tensor;
 
 pub use face::FaceLandmarks;
 pub use frame::Frame;
+pub use pose::{CameraModel, HeadPose, Pose6};
 pub use roi::Roi;

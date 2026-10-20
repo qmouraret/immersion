@@ -5,10 +5,16 @@ use std::time::Instant;
 
 use capture::CameraInfo;
 use eframe::egui::{self, Color32, ColorImage, Pos2, Stroke, TextureHandle, TextureOptions};
+use nalgebra::Vector3;
 use tracker_core::face::index;
+use tracker_core::stats::Rolling;
+use tracker_core::{HeadPose, Pose6};
 use vision::{FaceResult, TrackMode};
 
-use crate::pipeline::{Pipeline, PipelineEvent};
+use crate::pipeline::{FrameOutput, Pipeline, PipelineCommand, PipelineEvent};
+
+/// Champ de vision horizontal par défaut, à ajuster (étalonnage en phase 5).
+const DEFAULT_HFOV_DEG: f32 = 66.0;
 
 /// Mesures du flux, affichées dans le panneau latéral.
 #[derive(Default)]
@@ -54,6 +60,7 @@ struct Overlay {
     mirror: bool,
     points: bool,
     roi: bool,
+    axes: bool,
 }
 
 pub struct CameraView {
@@ -65,6 +72,13 @@ pub struct CameraView {
     /// Taille de l'image affichée, pour placer les points.
     frame_size: (f32, f32),
     face: Option<FaceResult>,
+    head: Option<HeadPose>,
+    pose: Option<Pose6>,
+    /// La pose affichée est-elle relative à une pose neutre ?
+    recentered: bool,
+    hfov_deg: f32,
+    /// Fenêtre glissante d'une seconde par axe (lacet, tangage, roulis, x, y, z).
+    jitter: [Rolling; 6],
     /// Format négocié, déjà mis en forme pour l'affichage.
     format: Option<String>,
     error: Option<String>,
@@ -82,6 +96,11 @@ impl CameraView {
             texture: None,
             frame_size: (1.0, 1.0),
             face: None,
+            head: None,
+            pose: None,
+            recentered: false,
+            hfov_deg: DEFAULT_HFOV_DEG,
+            jitter: std::array::from_fn(|_| Rolling::new(30)),
             format: None,
             error: None,
             stats: Stats::default(),
@@ -89,6 +108,7 @@ impl CameraView {
                 mirror: true,
                 points: true,
                 roi: true,
+                axes: true,
             },
         };
         view.refresh_cameras();
@@ -109,11 +129,19 @@ impl CameraView {
         // Remplacer l'Option détruit l'ancien pipeline → son `Drop` arrête
         // l'ancien thread (et donc la caméra) avant d'ouvrir la nouvelle.
         self.pipeline = None;
-        self.pipeline = Some(Pipeline::start(index, self.models_dir.clone()));
+        self.pipeline = Some(Pipeline::start(
+            index,
+            self.models_dir.clone(),
+            self.hfov_deg,
+        ));
         self.selected = Some(index);
         self.format = None;
         self.error = None;
         self.face = None;
+        self.head = None;
+        self.pose = None;
+        self.recentered = false;
+        self.reset_jitter();
         self.stats = Stats::default();
     }
 
@@ -128,11 +156,7 @@ impl CameraView {
         for event in pipeline.drain() {
             match event {
                 PipelineEvent::Started(format) => self.format = Some(format),
-                PipelineEvent::Frame {
-                    frame,
-                    decode_ms,
-                    face,
-                } => latest = Some((frame, decode_ms, face)),
+                PipelineEvent::Frame(output) => latest = Some(output),
                 PipelineEvent::Error { message, fatal } => {
                     self.error = Some(message);
                     stopped |= fatal;
@@ -146,7 +170,15 @@ impl CameraView {
             self.pipeline = None;
         }
 
-        if let Some((frame, decode_ms, face)) = latest {
+        if let Some(output) = latest {
+            // Déstructuration d'une `Box` : on déplace ses champs hors du tas.
+            let FrameOutput {
+                frame,
+                decode_ms,
+                face,
+                head,
+                pose,
+            } = *output;
             let upload_start = Instant::now();
             let size = [frame.width as usize, frame.height as usize];
             let image = ColorImage::from_rgb(size, &frame.rgb);
@@ -165,6 +197,97 @@ impl CameraView {
             }
             self.frame_size = (frame.width as f32, frame.height as f32);
             self.face = face;
+            self.head = head;
+            self.pose = pose;
+            if let Some(p) = pose {
+                let values = [p.angles.yaw, p.angles.pitch, p.angles.roll, p.x, p.y, p.z];
+                for (r, v) in self.jitter.iter_mut().zip(values) {
+                    r.push(v);
+                }
+            }
+        }
+    }
+
+    /// Les valeurs sautent (recentrage, autre focale) : les anciennes mesures
+    /// ne veulent plus rien dire.
+    fn reset_jitter(&mut self) {
+        self.jitter.iter_mut().for_each(Rolling::clear);
+    }
+
+    fn send(&self, command: PipelineCommand) {
+        if let Some(p) = &self.pipeline {
+            p.send(command);
+        }
+    }
+
+    fn recenter(&mut self) {
+        self.send(PipelineCommand::Recenter);
+        self.recentered = true;
+        self.reset_jitter();
+    }
+
+    fn head_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Tête");
+        match &self.pose {
+            None => {
+                ui.label("—");
+            }
+            Some(_) => {
+                // Moyenne sur 1 s (lisible) et écart-type (la gigue) : les valeurs
+                // brutes changent trop vite pour être lues à l'œil.
+                ui.label("Moyenne sur 1 s   ± gigue (écart-type)");
+                let names = [
+                    ("Lacet (droite +)", "°"),
+                    ("Tangage (haut +)", "°"),
+                    ("Roulis (droite +)", "°"),
+                    ("X (droite +)", "cm"),
+                    ("Y (haut +)", "cm"),
+                    ("Z (recul +)", "cm"),
+                ];
+                egui::Grid::new("pose")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for ((name, unit), r) in names.iter().zip(&self.jitter) {
+                            ui.label(*name);
+                            ui.monospace(format!("{:+7.1} {unit}", r.mean().unwrap_or(0.0)));
+                            ui.monospace(format!("± {:.2}", r.std_dev().unwrap_or(0.0)));
+                            ui.end_row();
+                        }
+                    });
+                if let Some(h) = &self.head {
+                    ui.label(format!("Distance caméra : {:.0} cm", -h.position.z));
+                    ui.label(format!("Erreur d'ajustement : {:.1} px", h.residual_px));
+                }
+            }
+        }
+        ui.label(if self.recentered {
+            "Relatif à la pose neutre"
+        } else {
+            "Absolu (repère caméra)"
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Recentrer (espace)").clicked() {
+                self.recenter();
+            }
+            if ui
+                .add_enabled(self.recentered, egui::Button::new("Absolu"))
+                .clicked()
+            {
+                self.send(PipelineCommand::ClearNeutral);
+                self.recentered = false;
+                self.reset_jitter();
+            }
+        });
+        let fov = ui.add(
+            egui::Slider::new(&mut self.hfov_deg, 40.0..=110.0)
+                .suffix("°")
+                .text("FOV horizontal"),
+        );
+        if fov.changed() {
+            self.send(PipelineCommand::SetHfov(self.hfov_deg));
+            self.recentered = false;
+            self.reset_jitter();
         }
     }
 
@@ -200,6 +323,7 @@ impl CameraView {
         ui.checkbox(&mut self.overlay.mirror, "Effet miroir");
         ui.checkbox(&mut self.overlay.points, "Points du visage");
         ui.checkbox(&mut self.overlay.roi, "Zone de recadrage");
+        ui.checkbox(&mut self.overlay.axes, "Axes de la tête");
 
         ui.separator();
         ui.heading("Flux");
@@ -237,6 +361,9 @@ impl CameraView {
                 ui.label(format!("Redétections : {}", self.stats.detections));
             }
         }
+
+        ui.separator();
+        self.head_panel(ui);
 
         if let Some(e) = &self.error {
             ui.separator();
@@ -304,6 +431,26 @@ impl CameraView {
                 painter.circle_filled(to_screen(p[0], p[1]), radius, c);
             }
         }
+
+        if self.overlay.axes
+            && let Some(head) = &self.head
+        {
+            // Trois axes de 6 cm partant du bout du nez, dans le repère du modèle :
+            // x (rouge) vers la gauche de la personne, y (vert) vers le haut,
+            // z (bleu) vers l'avant. Projetés avec l'ajustement image.
+            let nose = tracker_core::canonical_face::CANONICAL_FACE[index::NOSE_TIP];
+            let nose = Vector3::new(f64::from(nose[0]), f64::from(nose[1]), f64::from(nose[2]));
+            let origin = head.project_model_point(nose);
+            let origin = to_screen(origin.0, origin.1);
+            for (axis, color) in [
+                (Vector3::x(), Color32::from_rgb(240, 70, 70)),
+                (Vector3::y(), Color32::from_rgb(70, 220, 90)),
+                (Vector3::z(), Color32::from_rgb(70, 140, 255)),
+            ] {
+                let tip = head.project_model_point(nose + axis * 6.0);
+                painter.line_segment([origin, to_screen(tip.0, tip.1)], Stroke::new(3.0, color));
+            }
+        }
     }
 }
 
@@ -311,6 +458,11 @@ impl eframe::App for CameraView {
     /// Logique (sans dessin) : appelée avant chaque `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_pipeline(ctx);
+
+        // Barre d'espace : recentrer (quand aucun champ de texte n'a le focus).
+        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.recenter();
+        }
 
         // Tant que la caméra tourne, on redessine en continu.
         if self.pipeline.is_some() {

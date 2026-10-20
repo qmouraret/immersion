@@ -6,3 +6,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Algèbre linéaire en pur Rust (SVD, rotations) : pas de dépendance native.
+nalgebra = "0.35"
