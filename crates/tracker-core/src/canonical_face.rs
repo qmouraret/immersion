@@ -1,7 +1,7 @@
 //! Modèle 3D canonique du visage MediaPipe (468 sommets, en centimètres).
 //!
 //! Source : `mediapipe/modules/face_geometry/data/canonical_face_model.obj`
-//! (https://github.com/google-ai-edge/mediapipe), Copyright Google LLC,
+//! (<https://github.com/google-ai-edge/mediapipe>), Copyright Google LLC,
 //! sous licence Apache-2.0. Seules les positions des sommets sont reprises.
 //!
 //! Repère : x vers la gauche *de la personne* (sa droite à l'écran),
@@ -481,3 +481,38 @@ pub const CANONICAL_FACE: [[f32; 3]; 468] = [
     [4.253081, 2.772296, 3.315305],
     [4.530000, 2.910000, 3.339685],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::face::index;
+
+    #[test]
+    fn coins_des_yeux_symetriques() {
+        let (r, l) = (
+            CANONICAL_FACE[index::RIGHT_EYE_OUTER],
+            CANONICAL_FACE[index::LEFT_EYE_OUTER],
+        );
+        // Œil droit de la personne à x < 0, œil gauche à x > 0, même hauteur et profondeur.
+        assert!(r[0] < 0.0 && l[0] > 0.0);
+        assert!(
+            (r[0] + l[0]).abs() < 1e-5 && (r[1] - l[1]).abs() < 1e-5 && (r[2] - l[2]).abs() < 1e-5
+        );
+    }
+
+    #[test]
+    fn le_nez_est_le_point_le_plus_en_avant() {
+        let nose_z = CANONICAL_FACE[index::NOSE_TIP][2];
+        let max_z = CANONICAL_FACE
+            .iter()
+            .map(|p| p[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(nose_z >= max_z - 0.2, "nez {nose_z}, max {max_z}");
+    }
+
+    #[test]
+    fn le_menton_est_en_bas() {
+        let chin_y = CANONICAL_FACE[index::CHIN][1];
+        assert!(CANONICAL_FACE.iter().all(|p| p[1] >= chin_y - 1e-5));
+    }
+}

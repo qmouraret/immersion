@@ -5,8 +5,11 @@ use nokhwa::utils::{CameraFormat, FrameFormat};
 /// Ce que l'on souhaite obtenir de la caméra.
 #[derive(Debug, Clone, Copy)]
 pub struct FormatTarget {
+    /// Largeur souhaitée, en pixels.
     pub width: u32,
+    /// Hauteur souhaitée, en pixels.
     pub height: u32,
+    /// Fréquence d'images minimale souhaitée.
     pub min_fps: u32,
 }
 

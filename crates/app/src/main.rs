@@ -1,5 +1,6 @@
 //! Immersion — head tracking webcam pour MSFS 2024.
 
+mod bench;
 mod camera_view;
 mod pipeline;
 mod tuning;

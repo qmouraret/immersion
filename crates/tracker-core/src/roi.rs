@@ -11,9 +11,13 @@
 /// En coordonnées image, y descend : un angle positif tourne dans le sens horaire.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Roi {
+    /// Abscisse du centre, en pixels.
     pub cx: f32,
+    /// Ordonnée du centre, en pixels.
     pub cy: f32,
+    /// Côté du carré, en pixels.
     pub size: f32,
+    /// Orientation, en radians (voir la convention ci-dessus).
     pub rotation: f32,
 }
 
@@ -44,6 +48,28 @@ impl Roi {
         let dx = ex * cos + ey * sin;
         let dy = -ex * sin + ey * cos;
         (dx / self.size + 0.5, dy / self.size + 0.5)
+    }
+
+    /// Stabilisation du suivi : garde `self` (le recadrage courant) tant que
+    /// `next` n'en diffère pas assez, sinon adopte `next`.
+    ///
+    /// Sans cela, la gigue des points déplace le recadrage, ce qui change
+    /// l'image donnée au modèle, donc ses points : le bruit s'entretient
+    /// d'image en image. Seuils relatifs à la taille du recadrage : `shift`
+    /// (déplacement du centre et variation de taille, en fraction du côté) et
+    /// `angle` (radians).
+    pub fn stabilized(&self, next: &Roi, shift: f32, angle: f32) -> Roi {
+        let moved = (next.cx - self.cx).hypot(next.cy - self.cy) > shift * self.size;
+        let resized = (next.size - self.size).abs() > shift * self.size;
+        // Écart d'angle ramené dans ]-π, π] (sinon 359° et 1° sembleraient loin).
+        let turn = (next.rotation - self.rotation + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        if moved || resized || turn.abs() > angle {
+            *next
+        } else {
+            *self
+        }
     }
 
     /// Les 4 coins dans l'image (pour l'affichage), dans l'ordre du contour.
@@ -105,6 +131,57 @@ mod tests {
 
     fn close(a: (f32, f32), b: (f32, f32)) -> bool {
         (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn stabilisation_ignore_les_petites_variations() {
+        let roi = Roi {
+            cx: 500.0,
+            cy: 300.0,
+            size: 400.0,
+            rotation: 0.1,
+        };
+        let jitter = Roi {
+            cx: 503.0,
+            cy: 298.0,
+            size: 404.0,
+            rotation: 0.11,
+        };
+        assert_eq!(roi.stabilized(&jitter, 0.02, 0.035), roi);
+    }
+
+    #[test]
+    fn stabilisation_suit_un_vrai_mouvement() {
+        let roi = Roi {
+            cx: 500.0,
+            cy: 300.0,
+            size: 400.0,
+            rotation: 0.0,
+        };
+        let moved = Roi { cx: 520.0, ..roi }; // 5 % du côté
+        let turned = Roi {
+            rotation: 0.1,
+            ..roi
+        }; // ≈ 6°
+        let zoomed = Roi { size: 430.0, ..roi };
+        for next in [moved, turned, zoomed] {
+            assert_eq!(roi.stabilized(&next, 0.02, 0.035), next);
+        }
+    }
+
+    #[test]
+    fn stabilisation_angles_autour_de_pi() {
+        let roi = Roi {
+            cx: 0.0,
+            cy: 0.0,
+            size: 100.0,
+            rotation: std::f32::consts::PI - 0.01,
+        };
+        let next = Roi {
+            rotation: -std::f32::consts::PI + 0.01,
+            ..roi
+        }; // 0,02 rad d'écart réel
+        assert_eq!(roi.stabilized(&next, 0.02, 0.035), roi);
     }
 
     #[test]

@@ -6,8 +6,11 @@ use std::time::Instant;
 /// l'autre, c'est la propriété du buffer qui voyage, sans copie.
 #[derive(Debug, Clone)]
 pub struct Frame {
+    /// Largeur en pixels.
     pub width: u32,
+    /// Hauteur en pixels.
     pub height: u32,
+    /// Pixels, ligne par ligne, 3 octets (R, G, B) par pixel.
     pub rgb: Vec<u8>,
     /// Instant de capture, pour mesurer la latence du pipeline.
     pub captured_at: Instant,

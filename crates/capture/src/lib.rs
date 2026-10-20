@@ -5,6 +5,9 @@
 //! (ou ajouter une source « vidéo enregistrée » pour le rejeu) ne touchera
 //! que cette crate.
 
+// Tout élément public doit être documenté (`cargo doc` sert de référence).
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -26,15 +29,19 @@ pub use format::FormatTarget;
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
     #[error("accès caméra refusé (Réglages Système → Confidentialité → Caméra)")]
+    /// macOS a refusé l'accès à la caméra pour l'application qui a lancé le programme.
     PermissionDenied,
     #[error("erreur caméra : {0}")]
+    /// Erreur remontée par nokhwa (ouverture, format, lecture d'image…).
     Backend(#[from] nokhwa::NokhwaError),
 }
 
 /// Description d'une caméra disponible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraInfo {
+    /// Index à passer à [`CaptureHandle::start`].
     pub index: u32,
+    /// Nom lisible (ex. « FaceTime HD Camera »).
     pub name: String,
 }
 
@@ -43,13 +50,22 @@ pub struct CameraInfo {
 pub enum CaptureEvent {
     /// Le flux est ouvert ; format réellement négocié avec la caméra.
     Started {
+        /// Largeur négociée, en pixels.
         width: u32,
+        /// Hauteur négociée, en pixels.
         height: u32,
+        /// Fréquence d'images négociée.
         fps: u32,
+        /// Format des pixels envoyé par la caméra (YUYV, NV12, MJPEG…).
         pixel_format: String,
     },
     /// Une image, et le temps passé à la convertir en RGB.
-    Frame { frame: Frame, decode_ms: f64 },
+    Frame {
+        /// L'image, en RGB.
+        frame: Frame,
+        /// Temps de conversion du format caméra en RGB, en ms.
+        decode_ms: f64,
+    },
     /// Erreur fatale : le thread s'arrête après l'avoir envoyée.
     Error(String),
 }
@@ -235,4 +251,40 @@ fn apply_best_format(camera: &mut Camera, target: FormatTarget) -> Result<(), Ca
         camera.camera_format()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Touche au matériel (et peut déclencher la demande d'accès caméra de macOS) :
+    /// lancé seulement à la demande, `cargo test -p capture -- --ignored`.
+    #[test]
+    #[ignore = "matériel : nécessite l'accès caméra"]
+    fn camera_inexistante_erreur_puis_arret_propre() {
+        let handle = CaptureHandle::start(9_999, FormatTarget::default());
+        let event = handle.recv_timeout(Duration::from_secs(5));
+        assert!(
+            matches!(event, Some(CaptureEvent::Error(_))),
+            "attendu une erreur, reçu {event:?}"
+        );
+        drop(handle); // ne doit pas bloquer : le thread s'est déjà arrêté
+    }
+
+    #[test]
+    #[ignore = "matériel : nécessite l'accès caméra"]
+    fn la_camera_par_defaut_envoie_des_images() {
+        let handle = CaptureHandle::start(0, FormatTarget::default());
+        let mut frames = 0;
+        let start = Instant::now();
+        while frames < 10 && start.elapsed() < Duration::from_secs(10) {
+            if let Some(CaptureEvent::Frame { frame, .. }) =
+                handle.recv_timeout(Duration::from_secs(1))
+            {
+                assert_eq!(frame.rgb.len(), (frame.width * frame.height * 3) as usize);
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 10);
+    }
 }

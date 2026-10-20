@@ -5,6 +5,9 @@
 //! - **suivi** ensuite : le recadrage de l'image suivante est déduit des
 //!   points de l'image courante, et le détecteur n'est plus appelé.
 
+// Tout élément public doit être documenté (`cargo doc` sert de référence).
+#![warn(missing_docs)]
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -18,14 +21,22 @@ use tracker_core::{Frame, Roi};
 
 /// Seuil de présence sous lequel on considère le visage perdu.
 const MIN_PRESENCE: f32 = 0.5;
+/// Stabilisation du recadrage : on ne le déplace que si le visage a bougé de
+/// plus de 2 % de la taille du recadrage, ou tourné de plus de 2°.
+const ROI_SHIFT: f32 = 0.02;
+const ROI_ANGLE: f32 = 0.035;
 
 #[derive(Debug, thiserror::Error)]
+/// Erreurs de chargement ou d'exécution des modèles.
 pub enum VisionError {
     #[error("modèle introuvable : {0} (lancer scripts/fetch_models.sh)")]
+    /// Fichier de modèle absent (chemin attendu).
     MissingModel(String),
     #[error("ONNX Runtime : {0}")]
+    /// Erreur d'ONNX Runtime (chargement, inférence).
     Ort(#[from] ort::Error),
     #[error("sortie inattendue du modèle : {0}")]
+    /// Une sortie n'a pas la forme attendue (nom de la sortie).
     BadOutput(&'static str),
 }
 
@@ -41,16 +52,21 @@ pub enum TrackMode {
 /// Résultat pour une image.
 #[derive(Debug, Clone)]
 pub struct FaceResult {
+    /// Points du visage, si un visage a été trouvé.
     pub landmarks: Option<FaceLandmarks>,
+    /// Comment le visage a été localisé.
     pub mode: TrackMode,
     /// Recadrage utilisé par le modèle de points (pour l'affichage).
     pub roi: Option<Roi>,
     /// Points clés BlazeFace en pixels image, si le détecteur a tourné.
     pub detection_keypoints: Option<Vec<(f32, f32)>>,
+    /// Temps du détecteur, en ms (0 en mode suivi).
     pub detect_ms: f64,
+    /// Temps du modèle de points, en ms.
     pub landmarks_ms: f64,
 }
 
+/// Détecteur + modèle de points, avec l'état du suivi d'une image à l'autre.
 pub struct FaceTracker {
     detector: Session,
     landmarker: Session,
@@ -59,6 +75,8 @@ pub struct FaceTracker {
     next_roi: Option<Roi>,
     /// Tampon d'entrée réutilisé (évite une allocation par image).
     input: Vec<f32>,
+    /// Stabilisation du recadrage activée (`IMMERSION_ROI_STABILIZE=0` la coupe, pour comparer).
+    stabilize_roi: bool,
 }
 
 impl FaceTracker {
@@ -92,6 +110,7 @@ impl FaceTracker {
             anchors: blazeface::anchors(),
             next_roi: None,
             input: Vec::new(),
+            stabilize_roi: std::env::var("IMMERSION_ROI_STABILIZE").map_or(true, |v| v != "0"),
         })
     }
 
@@ -137,10 +156,16 @@ impl FaceTracker {
         result.roi = Some(roi);
 
         // 3) Préparer l'image suivante : suivi si le visage est toujours là.
-        self.next_roi = landmarks
+        let candidate = landmarks
             .as_ref()
             .filter(|lm| lm.presence >= MIN_PRESENCE)
             .and_then(FaceLandmarks::next_roi);
+        // Visage immobile : on garde le même recadrage, le modèle voit la même
+        // image et ses points ne « dérivent » plus d'eux-mêmes (voir `Roi::stabilized`).
+        self.next_roi = match candidate {
+            Some(next) if self.stabilize_roi => Some(roi.stabilized(&next, ROI_SHIFT, ROI_ANGLE)),
+            other => other,
+        };
         result.landmarks = landmarks;
         Ok(result)
     }

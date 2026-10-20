@@ -30,6 +30,7 @@ pub struct AxisCurve {
 }
 
 impl AxisCurve {
+    /// Applique la zone morte et la courbe à `x` (fonction impaire : `apply(-x) = -apply(x)`).
     pub fn apply(&self, x: f64) -> f64 {
         let span = (self.input - self.deadzone).max(f64::EPSILON);
         let t = ((x.abs() - self.deadzone) / span).clamp(0.0, 1.0);

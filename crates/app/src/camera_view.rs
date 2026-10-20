@@ -6,12 +6,15 @@ use std::time::Instant;
 use capture::CameraInfo;
 use eframe::egui::{self, Color32, ColorImage, Pos2, Stroke, TextureHandle, TextureOptions};
 use nalgebra::Vector3;
+use tracker_core::autotune::AxisGroup;
 use tracker_core::face::index;
+use tracker_core::landmark_log::LandmarkFrame;
 use tracker_core::processing::{Processed, TrackingSettings};
 use tracker_core::stats::Rolling;
 use tracker_core::{HeadPose, Pose6};
 use vision::{FaceResult, TrackMode};
 
+use crate::bench::{Bench, Sample, Tab};
 use crate::pipeline::{FrameOutput, Pipeline, PipelineCommand, PipelineEvent};
 use crate::tuning::Tuning;
 
@@ -81,6 +84,10 @@ pub struct CameraView {
     hfov_deg: f32,
     processed: Option<Processed>,
     tuning: Tuning,
+    bench: Bench,
+    tab: Tab,
+    /// Origine des temps du banc de test.
+    started_at: Instant,
     /// Fenêtres glissantes d'une seconde par axe, avant et après le filtre.
     jitter_raw: [Rolling; 6],
     jitter_filtered: [Rolling; 6],
@@ -107,6 +114,9 @@ impl CameraView {
             hfov_deg: DEFAULT_HFOV_DEG,
             processed: None,
             tuning: Tuning::new(TrackingSettings::default()),
+            bench: Bench::new(PathBuf::from("recordings")),
+            tab: Tab::Camera,
+            started_at: Instant::now(),
             jitter_raw: std::array::from_fn(|_| Rolling::new(30)),
             jitter_filtered: std::array::from_fn(|_| Rolling::new(30)),
             format: None,
@@ -165,7 +175,36 @@ impl CameraView {
         for event in pipeline.drain() {
             match event {
                 PipelineEvent::Started(format) => self.format = Some(format),
-                PipelineEvent::Frame(output) => latest = Some(output),
+                PipelineEvent::Frame(output) => {
+                    // Chaque image alimente le banc de test (même celles que l'on
+                    // n'affichera pas) : les courbes et les enregistrements sont complets.
+                    let t = output
+                        .frame
+                        .captured_at
+                        .duration_since(self.started_at)
+                        .as_secs_f64();
+                    // Les points ne sont copiés que pendant un enregistrement.
+                    if self.bench.is_recording()
+                        && let Some(lm) = output.face.as_ref().and_then(|f| f.landmarks.as_ref())
+                    {
+                        self.bench.push_landmarks(LandmarkFrame {
+                            t,
+                            width: output.frame.width as f32,
+                            height: output.frame.height as f32,
+                            hfov_deg: self.hfov_deg,
+                            landmarks: lm.clone(),
+                        });
+                    }
+                    if let (Some(pose), Some(p)) = (output.pose, output.processed) {
+                        self.bench.push(Sample {
+                            t,
+                            raw: pose.to_array(),
+                            filtered: p.filtered.to_array(),
+                            output: p.output.to_array(),
+                        });
+                    }
+                    latest = Some(output);
+                }
                 PipelineEvent::Error { message, fatal } => {
                     self.error = Some(message);
                     stopped |= fatal;
@@ -234,6 +273,7 @@ impl CameraView {
     }
 
     fn recenter(&mut self) {
+        self.bench.clear();
         self.send(PipelineCommand::Recenter);
         self.recentered = true;
         self.reset_jitter();
@@ -525,7 +565,31 @@ impl eframe::App for CameraView {
                     }
                 });
             });
-        egui::CentralPanel::default().show(ui, |ui| self.camera_image(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (tab, name) in Tab::ALL {
+                    ui.selectable_value(&mut self.tab, tab, name);
+                }
+                if self.bench.is_recording() {
+                    ui.colored_label(Color32::from_rgb(240, 70, 70), "● enregistrement");
+                }
+            });
+            ui.separator();
+            match self.tab {
+                Tab::Camera => self.camera_image(ui),
+                tab => {
+                    if let Some((group, params)) = self.bench.ui(ui, tab, &self.tuning.settings) {
+                        match group {
+                            AxisGroup::Rotation => self.tuning.settings.rotation_filter = params,
+                            AxisGroup::Translation => self.tuning.settings.position_filter = params,
+                        }
+                        self.tuning.settings.filter_enabled = true;
+                        let settings = Box::new(self.tuning.settings.clone());
+                        self.send(PipelineCommand::SetSettings(settings));
+                    }
+                }
+            }
+        });
     }
 }
 

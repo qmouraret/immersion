@@ -16,20 +16,28 @@ const MIN_SUPPRESSION_IOU: f32 = 0.3;
 pub mod keypoint {
     /// Œil droit de la personne (à gauche dans une image non mirroir).
     pub const RIGHT_EYE: usize = 0;
+    /// Œil gauche de la personne.
     pub const LEFT_EYE: usize = 1;
+    /// Bout du nez.
     pub const NOSE_TIP: usize = 2;
+    /// Centre de la bouche.
     pub const MOUTH: usize = 3;
 }
 
 /// Un visage détecté, en coordonnées normalisées [0, 1] de l'entrée du modèle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detection {
+    /// Probabilité (sigmoïde du logit), entre 0 et 1.
     pub score: f32,
     /// Boîte : centre et taille.
     pub cx: f32,
+    /// Ordonnée du centre de la boîte.
     pub cy: f32,
+    /// Largeur de la boîte.
     pub w: f32,
+    /// Hauteur de la boîte.
     pub h: f32,
+    /// Points clés (x, y), dans l'ordre du module [`keypoint`].
     pub keypoints: [(f32, f32); NUM_KEYPOINTS],
 }
 

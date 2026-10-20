@@ -3,6 +3,10 @@
 Head tracking par webcam pour Microsoft Flight Simulator 2024, écrit en Rust.
 Le cahier des charges complet est dans [PROMPT.md](PROMPT.md).
 
+Pour contribuer ou reprendre le code (architecture, conventions, règles d'implémentation) :
+**[AGENTS.md](AGENTS.md)**. Voir aussi [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) et
+[docs/TESTS.md](docs/TESTS.md).
+
 ## Structure
 
 ```
@@ -12,8 +16,10 @@ immersion/
     ├── tracker-core/     # pipeline pur, sans E/S (types, maths de pose, filtres)
     ├── capture/          # webcam sur un thread dédié (seule crate qui connaît nokhwa)
     ├── vision/           # inférence ONNX Runtime (seule crate qui connaît ort)
-    └── app/              # binaire `immersion` : interface egui + thread pipeline
+    └── app/              # binaire `immersion` : interface egui, pipeline, banc de test
 ```
+
+Le détail (threads, conventions de repères, règles) est dans [AGENTS.md](AGENTS.md).
 
 Flux de données en phase 0 :
 
@@ -229,3 +235,81 @@ Panneau de droite :
    ramener progressivement la sortie à 0 plutôt que de la figer.
 2. Écrire un test qui mesure le **retard en millisecondes** du filtre sur une rampe, pour plusieurs
    valeurs de β, et l'afficher avec `cargo test -- --nocapture`.
+
+## Phase 4 — Banc de test
+
+Des onglets au-dessus de la zone centrale ; les panneaux de réglage restent visibles.
+
+| Onglet | Usage |
+|---|---|
+| **Mire** | « Démarrer les cibles » : poser le réticule sur la cible et l'y maintenir 0,5 s. Le temps d'acquisition moyen mesure le compromis réactivité / stabilité. Le point gris montre la même tête **sans filtre**. |
+| **Scène 3D** | Cockpit d'avion léger (aile haute) et sol quadrillé, vus à travers la tête. Les lettres N/E/S/O aident à juger les grandes rotations. Translations désactivables. |
+| **Courbes** | Brut / filtré, et la sortie, sur 2 à 20 s. **Rugosité** (tremblement image à image) et **retard** du filtre (dès 5° de mouvement). |
+| **Enregistrements** | Enregistrer une session (pose brute en CSV dans `recordings/`), puis la **rejouer avec les réglages actuels** : chaque curseur met à jour les courbes et les mesures. |
+
+### Mesures
+
+- **Rugosité à l'arrêt** = moyenne quadratique de `x[i+1] − 2·x[i] + x[i−1]`, médiane sur des fenêtres
+  de 0,5 s. Une rampe (mouvement régulier) donne 0, et la médiane écarte les débuts et fins de mouvements :
+  il ne reste que le tremblement. Pour la **sortie**, on ne garde que les fenêtres hors zone morte : c'est
+  là que le tremblement se voit, amplifié par la courbe.
+- **Retard** = décalage (0 à 300 ms) qui superpose le mieux le filtré au brut.
+
+### Méthode de réglage conseillée
+
+1. Enregistrer environ 20 s : 5 s immobile, quelques rotations vives du lacet et du tangage, puis à nouveau immobile.
+2. Inclure des moments **tête tenue sur le côté** (15 à 25°) : c'est là que le tremblement se voit.
+3. Dans « Enregistrements », choisir un retard maximal (60 ms par défaut), puis **« Proposer un réglage
+   des rotations »** : le meilleur réglage de la grille est appliqué. À la main : baisser la **coupure min.**
+   pour réduire la rugosité de sortie, monter **β** pour réduire le retard.
+4. Vérifier la sensation dans la **Mire** et la **Scène 3D**. Une coupure très basse (< 0,1 Hz) rend les
+   mouvements *lents* « mous » : le retard mesuré ne concerne que les mouvements rapides.
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| Module en dossier (`bench/mod.rs` + sous-modules privés) | `app/src/bench/` |
+| `VecDeque` comme fenêtre glissante dans le temps | `Bench::push` |
+| `slice::windows(3)` pour la différence seconde | `stats::roughness` |
+| Motif de tranche `let [a, b, ..] = v[..] else { … }` | `recording::from_csv` |
+| `impl std::error::Error` écrit à la main (sans `thiserror`) | `recording::ParseError` |
+| `collect::<Result<Vec<_>, _>>()` : s'arrêter à la première erreur | `recording::from_csv` |
+| `Option::take` puis remise en place (emprunt contourné proprement) | `Recordings::ui` |
+| Projection perspective et découpe au plan proche | `bench/scene.rs` |
+
+### Stabilisation et nouvelles valeurs par défaut (retour d'essai)
+
+Même filtrée, la vue tremblait dès qu'on regardait sur le côté. Deux causes et deux corrections :
+
+- **Le bruit s'entretenait dans la boucle de suivi** : le recadrage était recalculé à partir des points de
+  l'image précédente, leur gigue le déplaçait, ce qui changeait les points suivants. Désormais, le
+  recadrage ne bouge que si le visage s'est déplacé de plus de 2 % ou a tourné de plus de 2°
+  (`Roi::stabilized`). Comparer avec `IMMERSION_ROI_STABILIZE=0`.
+- **Le filtre par défaut était trop peu lissant, une fois la courbe appliquée.** Réglé sur une vraie session de
+  35 s avec `tune_filter`, on passe de 0,5 Hz / β 0,05 / `d_cutoff` 1 Hz à **0,1 Hz / β 0,03 / `d_cutoff` 3 Hz**.
+  Le tremblement de sortie hors zone morte passe de 0,144° à 0,091°, pour un retard de 70 ms au lieu de 57.
+  Sans filtre, il serait de 1,04°.
+- **Leçon de la recherche** : sur des données réelles, la coupure minimale compte peu, et ce sont β et
+  `d_cutoff` qui décident. La gigue fait croire au filtre que la tête bouge, et β relève alors la coupure.
+  Un `d_cutoff` élevé repère plus tôt le début des vrais mouvements, ce qui permet un β plus faible.
+
+### Enregistrer les points du visage pour améliorer le calcul de la pose
+
+Chaque enregistrement écrit maintenant **deux fichiers** : `session-XXX.csv` (la pose) et `session-XXX.lmk`
+(les 478 points de chaque image, en binaire, environ 6 Mo pour 30 s). Ils permettent de comparer hors ligne
+plusieurs façons de calculer la pose sur exactement les mêmes points :
+
+```bash
+cargo run --release -p tracker-core --example analyze_session -- recordings/session-XXX.csv
+cargo run --release -p tracker-core --example eval_pose -- recordings/session-XXX.lmk
+```
+
+Variantes comparées : avec ou sans le second passage robuste, avec les 468 points ou seulement 59 points
+rigides (front, nez, coins des yeux, pommettes, tempes).
+
+**Résultat sur une vraie session** : les variantes du calcul de pose diffèrent de moins de 10 %. Le bruit vient
+des points du modèle, pas du calcul. Le levier est ailleurs : **Z**, déduit de la taille apparente du visage,
+est 10 fois plus bruité que X. Les translations ont donc maintenant leur propre filtre, plus lent
+(0,17 Hz / β 0,17), et Z une zone morte de 0,4 cm et un gain de ×1,33. Le tremblement de Z en sortie est
+divisé par 3, pour un retard de 100 à 130 ms sur les translations, contre environ 70 ms sur les rotations.

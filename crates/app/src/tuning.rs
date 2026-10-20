@@ -30,7 +30,7 @@ impl Tuning {
                 ui.label("Translations");
                 changed |= filter_sliders(ui, &mut s.position_filter, 10.0);
             });
-            ui.small("Coupure min. ↑ si la vue « traîne » à l'arrêt ; β ↑ si elle est en retard en mouvement.");
+            ui.small("Coupure min. ↑ si la vue « traîne » à l'arrêt ; β ↑ si elle est en retard en mouvement ; coupure vitesse ↑ pour réagir plus tôt au début d'un mouvement.");
         });
 
         egui::CollapsingHeader::new("Courbes de réponse")
@@ -99,7 +99,13 @@ fn filter_sliders(ui: &mut egui::Ui, p: &mut OneEuroParams, beta_scale: f64) -> 
             .smallest_positive(0.001)
             .text("β (réactivité)"),
     );
-    a.changed() || b.changed()
+    let d = ui.add(
+        egui::Slider::new(&mut p.d_cutoff, 0.1..=10.0)
+            .logarithmic(true)
+            .suffix(" Hz")
+            .text("Coupure vitesse"),
+    );
+    a.changed() || b.changed() || d.changed()
 }
 
 /// Trace la courbe (partie positive) et la position actuelle de la tête.

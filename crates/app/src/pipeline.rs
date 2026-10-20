@@ -269,3 +269,150 @@ fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use nalgebra::Vector3;
+    use tracker_core::pose::Angles;
+    use tracker_core::testing::{gray_frame, synthetic_landmarks};
+    use vision::TrackMode;
+
+    use super::*;
+
+    const HFOV: f32 = 66.0;
+
+    fn state() -> State {
+        State {
+            hfov_deg: HFOV,
+            neutral: None,
+            recenter_requested: true,
+            settings: TrackingSettings::default(),
+            processor: PoseProcessor::default(),
+            last_pose_at: None,
+        }
+    }
+
+    /// Image + résultat de visage pour une tête au lacet donné, à 60 cm.
+    fn observe(state: &mut State, yaw: f64, at: Instant) -> (Option<Pose6>, Option<Processed>) {
+        let frame = gray_frame(1920, 1080, 0, at);
+        let camera = CameraModel {
+            width: 1920.0,
+            height: 1080.0,
+            hfov_deg: state.hfov_deg,
+        };
+        let angles = Angles {
+            yaw,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        let face = FaceResult {
+            landmarks: Some(synthetic_landmarks(
+                &camera,
+                angles,
+                Vector3::new(0.0, 0.0, -60.0),
+            )),
+            mode: TrackMode::Tracked,
+            roi: None,
+            detection_keypoints: None,
+            detect_ms: 0.0,
+            landmarks_ms: 0.0,
+        };
+        let (_, pose, processed) = state.pose(&frame, Some(&face));
+        (pose, processed)
+    }
+
+    #[test]
+    fn recentre_automatiquement_sur_la_premiere_pose() {
+        let mut s = state();
+        let t0 = Instant::now();
+        let (first, _) = observe(&mut s, 20.0, t0);
+        assert!(
+            first.unwrap().angles.yaw.abs() < 1e-6,
+            "la première pose devient le zéro"
+        );
+        let (next, _) = observe(&mut s, 30.0, t0 + Duration::from_millis(33));
+        assert!((next.unwrap().angles.yaw - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn absolu_apres_clear_neutral() {
+        let mut s = state();
+        let t0 = Instant::now();
+        observe(&mut s, 20.0, t0);
+        s.apply(PipelineCommand::ClearNeutral);
+        let (pose, _) = observe(&mut s, 20.0, t0 + Duration::from_millis(33));
+        assert!((pose.unwrap().angles.yaw - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn changer_le_fov_redemande_un_recentrage() {
+        let mut s = state();
+        let t0 = Instant::now();
+        observe(&mut s, 0.0, t0);
+        s.apply(PipelineCommand::SetHfov(80.0));
+        assert!(s.recenter_requested);
+        let (pose, _) = observe(&mut s, 15.0, t0 + Duration::from_millis(33));
+        assert!(
+            pose.unwrap().angles.yaw.abs() < 1e-6,
+            "nouveau zéro après le changement de FOV"
+        );
+    }
+
+    #[test]
+    fn les_reglages_recus_sont_appliques() {
+        let mut s = state();
+        let settings = TrackingSettings {
+            filter_enabled: false,
+            curves_enabled: false,
+            ..Default::default()
+        };
+        s.apply(PipelineCommand::SetSettings(Box::new(settings)));
+        let t0 = Instant::now();
+        observe(&mut s, 0.0, t0);
+        let (pose, processed) = observe(&mut s, 12.0, t0 + Duration::from_millis(33));
+        // Sans filtre ni courbe, la sortie est la pose brute.
+        assert!((processed.unwrap().output.angles.yaw - pose.unwrap().angles.yaw).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pas_de_pose_sans_visage() {
+        let mut s = state();
+        let frame = gray_frame(640, 480, 0, Instant::now());
+        assert!(matches!(s.pose(&frame, None), (None, None, None)));
+        assert!(s.recenter_requested, "le recentrage attend un vrai visage");
+    }
+
+    #[test]
+    fn le_dt_du_filtre_suit_l_horloge_des_images() {
+        // Même saut de 10°, une fois 33 ms après l'image précédente, une fois 1 s
+        // après (visage perdu un moment). Réglages fixés ici (0,5 Hz, β = 0,05) :
+        // - 33 ms : vitesse ≈ 300 °/s → coupure ≈ 3 Hz → α ≈ 0,39 → ≈ 3,9° ;
+        // - 1 s   : vitesse ≈ 10 °/s → coupure ≈ 0,9 Hz → α ≈ 0,85 → ≈ 8,5°.
+        // Si le dt était supposé constant, les deux cas donneraient la même valeur.
+        let after = |delay: Duration| {
+            let mut s = state();
+            s.settings.curves_enabled = false;
+            s.settings.rotation_filter = tracker_core::filter::OneEuroParams {
+                min_cutoff: 0.5,
+                beta: 0.05,
+                d_cutoff: 1.0,
+            };
+            let t0 = Instant::now();
+            observe(&mut s, 0.0, t0);
+            observe(&mut s, 10.0, t0 + delay)
+                .1
+                .unwrap()
+                .filtered
+                .angles
+                .yaw
+        };
+        let (fast, slow) = (
+            after(Duration::from_millis(33)),
+            after(Duration::from_secs(1)),
+        );
+        assert!((3.0..5.0).contains(&fast), "après 33 ms : {fast:.2}°");
+        assert!((7.5..9.5).contains(&slow), "après 1 s : {slow:.2}°");
+    }
+}

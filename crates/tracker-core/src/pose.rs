@@ -20,7 +20,9 @@ use crate::canonical_face::CANONICAL_FACE;
 /// Modèle de caméra sténopé (pinhole), centre optique au centre de l'image.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraModel {
+    /// Largeur de l'image, en pixels.
     pub width: f32,
+    /// Hauteur de l'image, en pixels.
     pub height: f32,
     /// Champ de vision horizontal, en degrés.
     pub hfov_deg: f32,
@@ -40,12 +42,16 @@ impl CameraModel {
 /// Similitude `dst ≈ scale · R · src + t` (rotation + échelle + translation).
 #[derive(Debug, Clone, Copy)]
 pub struct Similarity {
+    /// Facteur d'échelle (ici : pixels par cm).
     pub scale: f64,
+    /// Rotation.
     pub rotation: Rotation3<f64>,
+    /// Translation (appliquée après rotation et échelle).
     pub translation: Vector3<f64>,
 }
 
 impl Similarity {
+    /// Transforme un point : `scale · R · p + t`.
     pub fn apply(&self, p: &Vector3<f64>) -> Vector3<f64> {
         self.scale * (self.rotation * p) + self.translation
     }
@@ -107,8 +113,11 @@ pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>], weights: &[f64]) -> O
 /// Angles de la tête en degrés (convention de [`Pose6`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Angles {
+    /// Lacet, positif vers la droite.
     pub yaw: f64,
+    /// Tangage, positif vers le haut.
     pub pitch: f64,
+    /// Roulis, positif vers l'épaule droite.
     pub roll: f64,
 }
 
@@ -149,9 +158,13 @@ impl Angles {
 /// Pose 6DOF dans le repère utilisateur : angles en degrés, positions en cm.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Pose6 {
+    /// Orientation, en degrés.
     pub angles: Angles,
+    /// Déplacement latéral, positif vers la droite, en cm.
     pub x: f64,
+    /// Déplacement vertical, positif vers le haut, en cm.
     pub y: f64,
+    /// Avance / recul, positif en s'éloignant de l'écran, en cm.
     pub z: f64,
 }
 
@@ -162,6 +175,7 @@ impl Pose6 {
         [a.yaw, a.pitch, a.roll, self.x, self.y, self.z]
     }
 
+    /// Inverse de [`Pose6::to_array`].
     pub fn from_array(v: [f64; 6]) -> Self {
         let [yaw, pitch, roll, x, y, z] = v;
         Self {
@@ -217,40 +231,104 @@ fn to_user(rotation: &Rotation3<f64>, position: &Vector3<f64>) -> Pose6 {
     }
 }
 
-/// Part des points conservés au second passage (les autres sont considérés
-/// comme aberrants : bouche, sourcils, points mal estimés).
-const INLIER_RATIO: f64 = 0.75;
+/// Points du visage peu déformés par les expressions : front, arête et base du
+/// nez, coins des yeux, pommettes, tempes. Ni bouche, ni mâchoire, ni sourcils,
+/// ni paupières. Ensemble symétrique (vérifié par les tests).
+pub const RIGID_POINTS: [usize; 59] = [
+    10, 151, 9, 108, 337, 69, 299, 104, 333, 67, 297, 109, 338, // front
+    168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98, 327, 64, 294, 48, 278, // nez
+    33, 133, 263, 362, 130, 359, // coins des yeux
+    116, 345, 117, 346, 118, 347, 123, 352, 50, 280, 36, 266, 101, 330, // pommettes
+    234, 454, 127, 356, 162, 389, 21, 251, 93, 323, // tempes, côtés du visage
+];
 
-/// Estime la pose de la tête à partir des points du visage.
+/// Points du visage utilisés pour l'alignement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointSet {
+    /// Les 468 points du maillage.
+    All,
+    /// [`RIGID_POINTS`] seulement.
+    Rigid,
+    /// Une liste d'indices donnée (expérimentations, `examples/eval_pose`).
+    Custom(&'static [usize]),
+}
+
+/// Variantes du calcul de pose (pour les comparer hors ligne, `examples/eval_pose`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EstimateOptions {
+    /// Points utilisés.
+    pub points: PointSet,
+    /// Part des points conservés au second passage, choisis à chaque image
+    /// (les autres sont considérés comme aberrants). `1.0` : pas de second passage.
+    pub inlier_ratio: f64,
+}
+
+impl Default for EstimateOptions {
+    /// Le calcul utilisé par l'application.
+    fn default() -> Self {
+        Self {
+            points: PointSet::All,
+            inlier_ratio: 0.75,
+        }
+    }
+}
+
+/// Estime la pose de la tête à partir des points du visage (calcul par défaut).
 pub fn estimate(landmarks: &FaceLandmarks, camera: &CameraModel) -> Option<HeadPose> {
-    let n = CANONICAL_FACE.len();
-    if landmarks.points.len() < n {
+    estimate_with(landmarks, camera, &EstimateOptions::default())
+}
+
+/// Estime la pose de la tête avec des options de calcul données.
+pub fn estimate_with(
+    landmarks: &FaceLandmarks,
+    camera: &CameraModel,
+    options: &EstimateOptions,
+) -> Option<HeadPose> {
+    if landmarks.points.len() < CANONICAL_FACE.len() {
         return None;
     }
-    let src: Vec<Vector3<f64>> = CANONICAL_FACE
+    let indices: Vec<usize> = match options.points {
+        PointSet::All => (0..CANONICAL_FACE.len()).collect(),
+        PointSet::Rigid => RIGID_POINTS.to_vec(),
+        PointSet::Custom(list) => list
+            .iter()
+            .copied()
+            .filter(|&i| i < CANONICAL_FACE.len())
+            .collect(),
+    };
+    let n = indices.len();
+    let src: Vec<Vector3<f64>> = indices
         .iter()
-        .map(|p| Vector3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])))
+        .map(|&i| {
+            let p = CANONICAL_FACE[i];
+            Vector3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
+        })
         .collect();
     // Points image → repère C : y vers le haut, z vers la caméra
     // (MediaPipe donne z < 0 pour ce qui est proche de la caméra).
-    let dst: Vec<Vector3<f64>> = landmarks.points[..n]
+    let dst: Vec<Vector3<f64>> = indices
         .iter()
-        .map(|p| Vector3::new(f64::from(p[0]), -f64::from(p[1]), -f64::from(p[2])))
+        .map(|&i| {
+            let p = landmarks.points[i];
+            Vector3::new(f64::from(p[0]), -f64::from(p[1]), -f64::from(p[2]))
+        })
         .collect();
 
-    // 1er passage : tous les points.
+    // 1er passage : tous les points retenus.
     let mut weights = vec![1.0; n];
-    let first = umeyama(&src, &dst, &weights)?;
+    let mut fit = umeyama(&src, &dst, &weights)?;
 
-    // 2e passage : on ne garde que les points les mieux alignés.
-    let residuals: Vec<f64> = residuals_2d(&first, &src, &dst);
-    let mut sorted = residuals.clone();
-    sorted.sort_by(f64::total_cmp);
-    let cutoff = sorted[((n as f64 * INLIER_RATIO) as usize).min(n - 1)];
-    for (w, r) in weights.iter_mut().zip(&residuals) {
-        *w = if *r <= cutoff { 1.0 } else { 0.0 };
+    // 2e passage (optionnel) : on ne garde que les points les mieux alignés.
+    if options.inlier_ratio < 1.0 {
+        let residuals: Vec<f64> = residuals_2d(&fit, &src, &dst);
+        let mut sorted = residuals.clone();
+        sorted.sort_by(f64::total_cmp);
+        let cutoff = sorted[((n as f64 * options.inlier_ratio) as usize).min(n - 1)];
+        for (w, r) in weights.iter_mut().zip(&residuals) {
+            *w = if *r <= cutoff { 1.0 } else { 0.0 };
+        }
+        fit = umeyama(&src, &dst, &weights)?;
     }
-    let fit = umeyama(&src, &dst, &weights)?;
     let kept = residuals_2d(&fit, &src, &dst)
         .iter()
         .zip(&weights)
@@ -301,33 +379,9 @@ mod tests {
         hfov_deg: 70.0,
     };
 
-    /// Visage synthétique : modèle canonique placé à une pose connue, puis
-    /// « vu » par la caméra comme le ferait MediaPipe (projection faible perspective).
+    /// Visage synthétique : voir [`crate::testing::synthetic_landmarks`].
     fn synthetic(angles: Angles, position: Vector3<f64>) -> FaceLandmarks {
-        let f = CAMERA.focal_px();
-        let depth = -position.z;
-        let scale = f / depth;
-        // Rotation apparente = rotation réelle vue depuis la ligne de visée.
-        let los = Rotation3::rotation_between(
-            &Vector3::z(),
-            &Unit::new_normalize(-position).into_inner(),
-        )
-        .unwrap();
-        let apparent = los.inverse() * angles.to_rotation();
-        let u0 = 960.0 + position.x * f / depth;
-        let v0 = 540.0 - position.y * f / depth;
-        let points = CANONICAL_FACE
-            .iter()
-            .map(|p| {
-                let m = Vector3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
-                let q = scale * (apparent * m);
-                [(u0 + q.x) as f32, (v0 - q.y) as f32, -q.z as f32]
-            })
-            .collect();
-        FaceLandmarks {
-            points,
-            presence: 1.0,
-        }
+        crate::testing::synthetic_landmarks(&CAMERA, angles, position)
     }
 
     fn assert_close(a: f64, b: f64, tol: f64, what: &str) {
@@ -439,6 +493,81 @@ mod tests {
         let pose = estimate(&lm, &CAMERA).unwrap().absolute();
         assert_close(pose.angles.yaw, -12.0, 0.5, "lacet");
         assert_close(pose.angles.pitch, 6.0, 0.5, "tangage");
+    }
+
+    #[test]
+    fn points_rigides_symetriques_et_sans_bouche() {
+        use std::collections::HashSet;
+        let set: HashSet<usize> = RIGID_POINTS.iter().copied().collect();
+        assert_eq!(set.len(), RIGID_POINTS.len(), "pas de doublon");
+        for &i in &RIGID_POINTS {
+            let p = CANONICAL_FACE[i];
+            // Le symétrique (x → −x) est le sommet le plus proche du point miroir.
+            let mirror = (0..CANONICAL_FACE.len())
+                .min_by(|&a, &b| {
+                    let d = |j: usize| {
+                        let q = CANONICAL_FACE[j];
+                        (q[0] + p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2)
+                    };
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap();
+            assert!(
+                set.contains(&mirror),
+                "le symétrique de {i} ({mirror}) manque"
+            );
+            // La bouche commence vers y = −3,4 cm dans le modèle canonique.
+            assert!(p[1] > -3.0, "le point {i} est trop bas (bouche ?)");
+        }
+    }
+
+    #[test]
+    fn variantes_de_calcul_retrouvent_la_pose() {
+        let angles = Angles {
+            yaw: 18.0,
+            pitch: -7.0,
+            roll: 4.0,
+        };
+        let lm = synthetic(angles, Vector3::new(5.0, -3.0, -65.0));
+        for options in [
+            EstimateOptions {
+                points: PointSet::Rigid,
+                inlier_ratio: 1.0,
+            },
+            EstimateOptions {
+                points: PointSet::All,
+                inlier_ratio: 1.0,
+            },
+            EstimateOptions {
+                points: PointSet::Rigid,
+                inlier_ratio: 0.75,
+            },
+        ] {
+            let pose = estimate_with(&lm, &CAMERA, &options).unwrap().absolute();
+            assert_close(pose.angles.yaw, 18.0, 1e-4, "lacet");
+            assert_close(pose.z, 65.0, 1e-4, "distance");
+        }
+    }
+
+    #[test]
+    fn points_rigides_insensibles_a_la_bouche() {
+        let angles = Angles {
+            yaw: -12.0,
+            pitch: 6.0,
+            roll: 0.0,
+        };
+        let mut lm = synthetic(angles, Vector3::new(0.0, 0.0, -60.0));
+        // Bouche grande ouverte : on déplace fortement le bas du visage.
+        for p in lm.points.iter_mut().filter(|p| p[1] > 600.0) {
+            p[1] += 40.0;
+        }
+        let options = EstimateOptions {
+            points: PointSet::Rigid,
+            inlier_ratio: 1.0,
+        };
+        let pose = estimate_with(&lm, &CAMERA, &options).unwrap().absolute();
+        assert_close(pose.angles.yaw, -12.0, 1e-3, "lacet");
+        assert_close(pose.angles.pitch, 6.0, 1e-3, "tangage");
     }
 
     #[test]

@@ -16,15 +16,18 @@ pub mod index {
     pub const RIGHT_EYE_OUTER: usize = 33;
     /// Coin externe de l'œil gauche de la personne.
     pub const LEFT_EYE_OUTER: usize = 263;
+    /// Bout du nez.
     pub const NOSE_TIP: usize = 1;
+    /// Bas du menton.
     pub const CHIN: usize = 152;
     /// Centres des iris (raffinement, indices 468 à 477).
     pub const RIGHT_IRIS: usize = 468;
+    /// Centre de l'iris gauche de la personne.
     pub const LEFT_IRIS: usize = 473;
 }
 
 /// Les points du visage dans une image.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FaceLandmarks {
     /// (x, y, z) en pixels de l'image source. `z` est la profondeur relative
     /// (même échelle que x ; négatif = plus près de la caméra).
