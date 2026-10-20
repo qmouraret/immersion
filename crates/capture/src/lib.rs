@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nokhwa::Camera;
 use nokhwa::pixel_format::{FormatDecoder, RgbFormat};
@@ -127,6 +127,14 @@ impl CaptureHandle {
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Attend le prochain événement, au plus `timeout`.
+    ///
+    /// Renvoie `None` si rien n'est arrivé à temps *ou* si le thread de
+    /// capture s'est arrêté (après avoir envoyé son `Error`).
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<CaptureEvent> {
+        self.events.recv_timeout(timeout).ok()
     }
 
     /// Récupère tous les événements en attente sans bloquer.

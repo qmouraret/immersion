@@ -1,6 +1,9 @@
 //! Immersion — head tracking webcam pour MSFS 2024.
 
 mod camera_view;
+mod pipeline;
+
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 
@@ -15,6 +18,10 @@ fn main() -> anyhow::Result<()> {
 
     capture::ensure_permission().context("autorisation caméra")?;
 
+    // Dossier des modèles ONNX (`scripts/fetch_models.sh`), relatif au dossier courant.
+    let models_dir =
+        std::env::var_os("IMMERSION_MODELS").map_or_else(|| PathBuf::from("models"), PathBuf::from);
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Immersion")
@@ -27,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Immersion",
         options,
-        Box::new(|_cc| Ok(Box::new(camera_view::CameraView::new()))),
+        Box::new(|_cc| Ok(Box::new(camera_view::CameraView::new(models_dir)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -1,0 +1,7 @@
+These ONNX graphs are converted from Google MediaPipe's Face Landmarker and
+Pose Landmarker models (https://developers.google.com/mediapipe), released
+under the Apache License, Version 2.0:
+  https://www.apache.org/licenses/LICENSE-2.0
+Conversion: QtMeshEditor scripts/export-facecap-onnx.py (numerical parity
+asserted against the Python mediapipe reference; see docs/MOCAP_SPIKE.md in
+https://github.com/fernandotonon/QtMeshEditor).

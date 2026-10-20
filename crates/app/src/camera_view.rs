@@ -1,9 +1,14 @@
-//! Phase 0 : sélection de la caméra et affichage du flux.
+//! Vue caméra : flux vidéo, points du visage superposés, mesures.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
-use capture::{CameraInfo, CaptureEvent, CaptureHandle, FormatTarget};
-use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use capture::CameraInfo;
+use eframe::egui::{self, Color32, ColorImage, Pos2, Stroke, TextureHandle, TextureOptions};
+use tracker_core::face::index;
+use vision::{FaceResult, TrackMode};
+
+use crate::pipeline::{Pipeline, PipelineEvent};
 
 /// Mesures du flux, affichées dans le panneau latéral.
 #[derive(Default)]
@@ -18,6 +23,8 @@ struct Stats {
     upload_ms: f64,
     /// Images sautées (trous dans les numéros de séquence).
     dropped: u64,
+    /// Nombre de fois où le détecteur a dû être relancé (visage perdu).
+    detections: u64,
     last_frame_at: Option<Instant>,
     last_seq: Option<u64>,
 }
@@ -42,29 +49,47 @@ impl Stats {
     }
 }
 
+/// Options d'affichage.
+struct Overlay {
+    mirror: bool,
+    points: bool,
+    roi: bool,
+}
+
 pub struct CameraView {
     cameras: Vec<CameraInfo>,
     selected: Option<u32>,
-    capture: Option<CaptureHandle>,
+    models_dir: PathBuf,
+    pipeline: Option<Pipeline>,
     texture: Option<TextureHandle>,
+    /// Taille de l'image affichée, pour placer les points.
+    frame_size: (f32, f32),
+    face: Option<FaceResult>,
     /// Format négocié, déjà mis en forme pour l'affichage.
     format: Option<String>,
     error: Option<String>,
     stats: Stats,
-    mirror: bool,
+    overlay: Overlay,
 }
 
 impl CameraView {
-    pub fn new() -> Self {
+    pub fn new(models_dir: PathBuf) -> Self {
         let mut view = Self {
             cameras: Vec::new(),
             selected: None,
-            capture: None,
+            models_dir,
+            pipeline: None,
             texture: None,
+            frame_size: (1.0, 1.0),
+            face: None,
             format: None,
             error: None,
             stats: Stats::default(),
-            mirror: true,
+            overlay: Overlay {
+                mirror: true,
+                points: true,
+                roi: true,
+            },
         };
         view.refresh_cameras();
         if let Some(first) = view.cameras.first().map(|c| c.index) {
@@ -81,35 +106,47 @@ impl CameraView {
     }
 
     fn open(&mut self, index: u32) {
-        // Remplacer l'Option détruit l'ancienne poignée → son `Drop` arrête
-        // l'ancien thread avant que le nouveau n'ouvre la caméra.
-        self.capture = None;
-        self.capture = Some(CaptureHandle::start(index, FormatTarget::default()));
+        // Remplacer l'Option détruit l'ancien pipeline → son `Drop` arrête
+        // l'ancien thread (et donc la caméra) avant d'ouvrir la nouvelle.
+        self.pipeline = None;
+        self.pipeline = Some(Pipeline::start(index, self.models_dir.clone()));
         self.selected = Some(index);
         self.format = None;
         self.error = None;
+        self.face = None;
         self.stats = Stats::default();
     }
 
-    /// Traite les événements du thread de capture ; ne garde que la dernière image.
-    fn poll_capture(&mut self, ctx: &egui::Context) {
-        let Some(capture) = &self.capture else { return };
+    /// Traite les événements du pipeline ; ne garde que la dernière image.
+    fn poll_pipeline(&mut self, ctx: &egui::Context) {
+        let Some(pipeline) = &self.pipeline else {
+            return;
+        };
 
         let mut latest = None;
-        for event in capture.drain() {
+        let mut stopped = false;
+        for event in pipeline.drain() {
             match event {
-                CaptureEvent::Started {
-                    width,
-                    height,
-                    fps,
-                    pixel_format,
-                } => self.format = Some(format!("{width}×{height} @ {fps} fps ({pixel_format})")),
-                CaptureEvent::Frame { frame, decode_ms } => latest = Some((frame, decode_ms)),
-                CaptureEvent::Error(e) => self.error = Some(e),
+                PipelineEvent::Started(format) => self.format = Some(format),
+                PipelineEvent::Frame {
+                    frame,
+                    decode_ms,
+                    face,
+                } => latest = Some((frame, decode_ms, face)),
+                PipelineEvent::Error { message, fatal } => {
+                    self.error = Some(message);
+                    stopped |= fatal;
+                }
             }
         }
 
-        if let Some((frame, decode_ms)) = latest {
+        if stopped {
+            // Le thread s'est arrêté : on libère le pipeline (et on cesse de
+            // redessiner en continu). Choisir une caméra le relance.
+            self.pipeline = None;
+        }
+
+        if let Some((frame, decode_ms, face)) = latest {
             let upload_start = Instant::now();
             let size = [frame.width as usize, frame.height as usize];
             let image = ColorImage::from_rgb(size, &frame.rgb);
@@ -123,6 +160,11 @@ impl CameraView {
             self.stats.upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
             self.stats.decode_ms = decode_ms;
             self.stats.on_frame(frame.seq, frame.age_ms());
+            if face.as_ref().is_some_and(|f| f.mode == TrackMode::Detected) {
+                self.stats.detections += 1;
+            }
+            self.frame_size = (frame.width as f32, frame.height as f32);
+            self.face = face;
         }
     }
 
@@ -152,7 +194,12 @@ impl CameraView {
         if ui.button("Actualiser la liste").clicked() {
             self.refresh_cameras();
         }
-        ui.checkbox(&mut self.mirror, "Effet miroir");
+
+        ui.separator();
+        ui.heading("Affichage");
+        ui.checkbox(&mut self.overlay.mirror, "Effet miroir");
+        ui.checkbox(&mut self.overlay.points, "Points du visage");
+        ui.checkbox(&mut self.overlay.roi, "Zone de recadrage");
 
         ui.separator();
         ui.heading("Flux");
@@ -169,6 +216,28 @@ impl CameraView {
         ui.label(format!("  dont envoi GPU : {:.1} ms", self.stats.upload_ms));
         ui.label(format!("Images sautées : {}", self.stats.dropped));
 
+        ui.separator();
+        ui.heading("Visage");
+        match &self.face {
+            None => {
+                ui.label("Modèles non chargés");
+            }
+            Some(face) => {
+                let presence = face.landmarks.as_ref().map_or(0.0, |l| l.presence);
+                ui.label(format!("Confiance : {:.0} %", presence * 100.0));
+                ui.add(egui::ProgressBar::new(presence).desired_height(6.0));
+                let mode = match (face.mode, face.landmarks.is_some()) {
+                    (_, false) => "aucun visage",
+                    (TrackMode::Detected, true) => "détection",
+                    (TrackMode::Tracked, true) => "suivi",
+                };
+                ui.label(format!("Mode : {mode}"));
+                ui.label(format!("Détecteur : {:.1} ms", face.detect_ms));
+                ui.label(format!("Points : {:.1} ms", face.landmarks_ms));
+                ui.label(format!("Redétections : {}", self.stats.detections));
+            }
+        }
+
         if let Some(e) = &self.error {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, e);
@@ -181,24 +250,70 @@ impl CameraView {
             return;
         };
         // Miroir : on inverse les coordonnées de texture horizontalement.
-        let uv = if self.mirror {
+        let uv = if self.overlay.mirror {
             egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
         } else {
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
         };
-        ui.centered_and_justified(|ui| {
-            ui.add(egui::Image::new(tex).uv(uv).shrink_to_fit());
-        });
+        let response = ui
+            .centered_and_justified(|ui| ui.add(egui::Image::new(tex).uv(uv).shrink_to_fit()))
+            .inner;
+
+        if let Some(face) = &self.face {
+            self.draw_face(ui.painter_at(response.rect), response.rect, face);
+        }
+    }
+
+    /// Dessine les points et la zone de recadrage par-dessus l'image.
+    fn draw_face(&self, painter: egui::Painter, rect: egui::Rect, face: &FaceResult) {
+        let (w, h) = self.frame_size;
+        let mirror = self.overlay.mirror;
+        // Pixels de l'image source → position à l'écran.
+        let to_screen = |x: f32, y: f32| -> Pos2 {
+            let u = if mirror { 1.0 - x / w } else { x / w };
+            rect.min + egui::vec2(u * rect.width(), y / h * rect.height())
+        };
+
+        if self.overlay.roi
+            && let Some(roi) = &face.roi
+        {
+            let color = match face.mode {
+                TrackMode::Detected => Color32::from_rgb(255, 170, 0),
+                TrackMode::Tracked => Color32::from_rgb(80, 160, 255),
+            };
+            let corners = roi.corners().map(|(x, y)| to_screen(x, y)).to_vec();
+            painter.add(egui::Shape::closed_line(corners, Stroke::new(1.5, color)));
+        }
+
+        if self.overlay.points
+            && let Some(lm) = &face.landmarks
+        {
+            // Vert si confiant, orange sinon : utile pour repérer les reflets des lunettes.
+            let color = if lm.presence > 0.8 {
+                Color32::from_rgb(60, 220, 120)
+            } else {
+                Color32::from_rgb(255, 150, 60)
+            };
+            for (i, p) in lm.points.iter().enumerate() {
+                let iris = i >= index::RIGHT_IRIS;
+                let (radius, c) = if iris {
+                    (1.8, Color32::from_rgb(0, 220, 255))
+                } else {
+                    (1.1, color)
+                };
+                painter.circle_filled(to_screen(p[0], p[1]), radius, c);
+            }
+        }
     }
 }
 
 impl eframe::App for CameraView {
     /// Logique (sans dessin) : appelée avant chaque `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_capture(ctx);
+        self.poll_pipeline(ctx);
 
         // Tant que la caméra tourne, on redessine en continu.
-        if self.capture.is_some() {
+        if self.pipeline.is_some() {
             ctx.request_repaint();
         }
     }

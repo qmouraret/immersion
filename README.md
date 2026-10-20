@@ -11,7 +11,8 @@ immersion/
 └── crates/
     ├── tracker-core/     # pipeline pur, sans E/S (types, maths de pose, filtres)
     ├── capture/          # webcam sur un thread dédié (seule crate qui connaît nokhwa)
-    └── app/              # binaire `immersion` : interface egui
+    ├── vision/           # inférence ONNX Runtime (seule crate qui connaît ort)
+    └── app/              # binaire `immersion` : interface egui + thread pipeline
 ```
 
 Flux de données en phase 0 :
@@ -75,3 +76,64 @@ Pour des mesures représentatives des performances : `cargo run --release --bin 
 2. Faire en sorte que la capture appelle `ctx.request_repaint()` à chaque image, au lieu de redessiner
    en continu. Indice : `egui::Context` est `Clone + Send`. Mais `capture` ne doit pas dépendre d'egui :
    comment découpler les deux ? (closure `Box<dyn Fn() + Send>`)
+
+## Phase 1 — Points du visage
+
+### Préparer
+
+```bash
+./scripts/fetch_models.sh   # 2 modèles MediaPipe convertis en ONNX (≈ 5 Mo, Apache-2.0)
+cargo run --bin immersion
+```
+
+La première compilation télécharge ONNX Runtime (bibliothèque native, via la crate `ort`).
+
+### Pipeline
+
+```
+[capture] ─Frame─▶ [pipeline]                                         ─▶ [UI]
+                    ├ visage inconnu : BlazeFace 128×128 → boîte + yeux  (≈ 2 ms)
+                    ├ recadrage orienté 256×256 → 478 points + présence  (≈ 10 ms)
+                    └ image suivante : recadrage déduit des points (suivi)
+```
+
+Le détecteur ne tourne que si le visage est perdu (présence < 50 %). Le reste du
+temps, on *suit* le visage à partir des points de l'image précédente.
+
+### Quoi observer
+
+- **Points verts** : confiance > 80 %. Oranges : en dessous. Points cyan : les iris.
+- **Cadre bleu** : recadrage en mode suivi. Orange : le détecteur vient de tourner.
+- Tourner, incliner la tête : le cadre doit pivoter avec elle, et les points rester collés au visage.
+- **Redétections** doit rester stable quand on bouge normalement. Il augmente si on sort du champ ou si
+  on masque le visage. C'est un bon test pour les lunettes : reflets, monture.
+- **Points** doit rester autour de 10 ms. Comparer les moteurs d'exécution :
+  `IMMERSION_DEVICE=efficiency cargo run --bin immersion` (CoreML) est environ 3 fois plus lent ici.
+
+### Outils de mesure
+
+```bash
+cargo run -p vision --example inspect_models     # entrées / sorties des modèles
+cargo run -p vision --example bench_models       # temps d'inférence
+cargo run -p vision --example profile_landmarks  # profil ORT par opération (JSON)
+cargo run -p tracker-core --example bench_sample # coût du recadrage
+```
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| Garder le cœur pur : maths testables, aucune dépendance native | `tracker-core` (roi, tensor, blazeface, face) |
+| Emprunt sans copie vers une bibliothèque C (`TensorRef`) | `vision::FaceTracker::detect` |
+| Tampon réutilisé (`Vec::clear` + `reserve`) : aucune allocation par image | `tensor::sample_roi` |
+| `as_chunks::<N>()` : tableaux de taille fixe, sans vérifications de bornes | `blazeface::decode`, `FaceLandmarks::from_model_output` |
+| Clé de tri `total_cmp` sur des `f32` (ordre total) | `blazeface::decode` |
+| Erreurs qui transportent une valeur à récupérer (`ort::Error<SessionBuilder>`) | `FaceTracker::new` |
+| Chaîne de `Drop` : pipeline → capture, arrêt en cascade | `app/src/pipeline.rs` |
+| Mesurer plutôt que supposer : le « bon » accélérateur était le plus lent | `device_policy` dans `vision/src/lib.rs` |
+
+### Exercices facultatifs
+
+1. Afficher les 6 points clés de BlazeFace (`detection_keypoints`) quand le détecteur tourne.
+2. `sample_roi` prend environ 4,5 ms pour le visage. Le paralléliser par lignes avec `std::thread::scope`
+   (sans crate externe) et mesurer avec `bench_sample`.

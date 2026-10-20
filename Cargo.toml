@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 tracker-core = { path = "crates/tracker-core" }
 capture = { path = "crates/capture" }
+vision = { path = "crates/vision" }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -29,4 +30,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.tracker-core]
+opt-level = 3
+
+[profile.dev.package.vision]
 opt-level = 3
