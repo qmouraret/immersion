@@ -13,6 +13,9 @@ et ce qu'elle apporte de natif ou de téléchargé. Versions relevées dans `Car
 | `nalgebra` | 0.35.0 | Apache-2.0 | `tracker-core`, `app` | Algèbre linéaire : vecteurs, `Rotation3`, SVD 3×3 | Pur Rust, référence de l'écosystème. Alternative : `glam` (plus rapide pour le jeu vidéo, mais sans SVD). |
 | `eframe` / `egui` | 0.37.0 | MIT OR Apache-2.0 | `app` | Interface graphique en mode immédiat, rendu wgpu | Simple et multiplateforme, idéal pour des outils de mesure. Changement d'API en 0.37 : `App::logic` + `App::ui`, `Panel::left/right`. |
 | `egui_plot` | 0.38.0 | MIT OR Apache-2.0 | `app` | Courbes temporelles du banc de test | Compatible avec egui 0.37 (vérifié avec `cargo tree -i egui`). |
+| `serde` | 1.0 | MIT OR Apache-2.0 | `tracker-core`, `app` | Sérialisation des réglages et de l'étalonnage (`derive`) | Standard de fait. Dans `tracker-core`, il ne fait que décrire les types : aucune entrée/sortie, la règle 1 est respectée. |
+| `toml` | 1.1 | MIT OR Apache-2.0 | `app` | Format des profils (`profiles/*.toml`) | Lisible et modifiable à la main. Alternatives : JSON (pas de commentaires, moins lisible), RON (moins répandu). |
+| `dirs` | 7.0 | MIT OR Apache-2.0 | `app` | Dossier de configuration de l'OS | Évite d'écrire en dur `~/Library/Application Support` ou `%APPDATA%`. |
 | `thiserror` | 2.0 | MIT OR Apache-2.0 | `capture`, `vision` | Erreurs typées des bibliothèques | Standard de fait. La version 1.0 présente dans le lock vient de `nokhwa`. |
 | `anyhow` | 1.0 | MIT OR Apache-2.0 | `app` | Erreurs du binaire, avec contexte | Standard de fait pour les applications. |
 | `tracing` | 0.1 | MIT | `app`, `capture`, `vision` | Journalisation structurée | Standard de l'écosystème ; `ort` l'utilise aussi. |

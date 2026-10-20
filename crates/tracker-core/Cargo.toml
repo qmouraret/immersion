@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 # Algèbre linéaire en pur Rust (SVD, rotations) : pas de dépendance native.
 nalgebra = "0.35"
+# Sérialisation des réglages et de l'étalonnage (profils TOML, côté app).
+serde.workspace = true

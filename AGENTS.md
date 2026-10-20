@@ -35,8 +35,8 @@ phase du README liste les concepts Rust qu'elle introduit.
 | 2 | Pose 6DOF | ✅ |
 | 3 | Lissage One-Euro, courbes, recentrage | ✅ |
 | 4 | Banc de test (mire, scène 3D, courbes, enregistrements), réglage automatique | ✅ |
-| 5 | Assistant d'étalonnage (webcam déportée, écran, FOV) | à faire |
-| 6 | Sortie UDP OpenTrack, configuration persistante, build Windows | à faire |
+| 5 | Assistant d'étalonnage (FOV, posture neutre, amplitudes, expressions), profils par webcam | ✅ |
+| 6 | Sortie UDP OpenTrack, build Windows | à faire |
 | 7 | Intégration MSFS 2024, puis émulation TrackIR native | à faire |
 | 8 | Suivi du regard (iris), épaules | à faire |
 
@@ -68,6 +68,7 @@ cargo doc --no-deps --open           # documentation de référence des crates
 | `IMMERSION_DEVICE` | matériel d'inférence : `cpu` (défaut), `gpu`, `npu`, `efficiency` |
 | `IMMERSION_THREADS` | threads ONNX Runtime par modèle (4 par défaut) |
 | `IMMERSION_ROI_STABILIZE` | `0` désactive la stabilisation du recadrage (pour comparer) |
+| `IMMERSION_CONFIG_DIR` | dossier de configuration (sinon celui de l'OS) ; les profils vont dans `profiles/` |
 
 ---
 
@@ -110,6 +111,8 @@ Modules principaux de `app` :
 | `pipeline.rs` | thread de traitement : capture → visage → pose → filtre → courbes ; commandes de l'UI |
 | `camera_view.rs` | application egui : panneaux, vidéo, superposition des points, onglets |
 | `tuning.rs` | panneau des réglages (filtre, courbes) |
+| `calibration.rs` | assistant d'étalonnage : collecte les mesures, renvoie des `CalibAction` |
+| `profile.rs` | profils TOML par webcam (FOV, réglages, correction des expressions) |
 | `bench/` | banc de test : `target` (mire), `scene` (3D), `plots` (courbes), `recordings` |
 
 ---
@@ -135,8 +138,12 @@ Modules principaux de `app` :
 - **Temps** : chaque `Frame` est horodatée (`captured_at`) juste après la lecture du capteur, avant
   le décodage. Le filtre utilise le **dt réel** entre deux poses.
 - **Commandes** : l'UI pilote le pipeline par messages (`Recenter`, `ClearNeutral`, `SetHfov`,
-  `SetSettings`). L'état de la pose (pose neutre, filtres) appartient au thread pipeline. Un
-  recentrage automatique a lieu sur la première pose, et après chaque changement de FOV.
+  `SetSettings`, `SetExpressionModel`). L'état de la pose (pose neutre, filtres, correction des
+  expressions) appartient au thread pipeline. Un recentrage, **moyenné sur 15 images**, a lieu au
+  démarrage et après chaque changement de FOV. Au démarrage, la première image sert de neutre
+  provisoire, pour que la sortie parte de 0 tout de suite.
+- **Profils** : au choix d'une webcam, son profil (`profile.rs`) est chargé : FOV, réglages et
+  correction des expressions. L'assistant d'étalonnage l'enregistre.
 
 ### Budget de performance (MacBook Pro M1 Pro, 1080p)
 
@@ -163,7 +170,7 @@ Objectif : **≥ 30 img/s** et **< 50 ms** de latence de bout en bout.
 | **Points MediaPipe** | x, y en px image ; z relatif (même échelle que x), **négatif = plus près** de la caméra | px | `face.rs` |
 | **Visage canonique** | x → gauche *de la personne*, y ↑, z → avant du visage ; origine ≈ centre de la tête | cm | `canonical_face.rs` |
 | **Caméra (C)** | x → droite de l'image, y ↑, z vers l'utilisateur (la caméra regarde vers −z) | cm | `pose.rs` |
-| **Sortie (`Pose6`)** | point de vue de l'utilisateur face à l'écran (voir ci-dessous) | °, cm | `pose.rs` |
+| **Sortie (`Pose6`)** | **repère de la tête neutre**, c'est-à-dire de l'écran, si l'utilisateur lui fait face au recentrage : point de vue de l'utilisateur (voir ci-dessous). Une caméra décalée ou inclinée est ainsi corrigée d'elle-même (`HeadPose::relative_to`) | °, cm | `pose.rs` |
 | **Scène 3D du banc** | x → droite, y ↑, z → arrière ; l'œil regarde vers −z | m | `bench/scene.rs` |
 
 ### Signes de la sortie (`Pose6`), point de vue de l'utilisateur
@@ -194,8 +201,7 @@ Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 ### Architecture
 
 1. **`tracker-core` reste pur** : aucune E/S (fichiers, réseau, caméra, UI), aucun moteur ML,
-   aucune dépendance native. Seules des dépendances en pur Rust y sont admises (aujourd'hui :
-   `nalgebra`). Tout ce qui peut s'y écrire doit s'y écrire, car c'est là que tout est testable.
+   aucune dépendance native. Seules des dépendances en pur Rust y sont admises (aujourd'hui : `nalgebra` et `serde`, ce dernier pour décrire les types sérialisables). Tout ce qui peut s'y écrire doit s'y écrire, car c'est là que tout est testable.
 2. **Une dépendance lourde par crate** : `nokhwa` reste dans `capture`, `ort` dans `vision`,
    egui dans `app`. Changer de bibliothèque ne doit toucher qu'une crate.
 3. **Rien de spécifique à un OS hors d'un `#[cfg(...)]`**. La cible est Windows : tout code propre
@@ -304,6 +310,7 @@ cargo run --release -p tracker-core --example analyze_session -- recordings/sess
 cargo run --release -p tracker-core --example tune_filter -- recordings/session-XXX.csv rot 60     # meilleur filtre (rot|pos) pour ≤ 60 ms
 cargo run --release -p tracker-core --example compare_filters -- recordings/session-XXX.csv rot 0.5:0.05 0.1:0.03:3
 cargo run --release -p tracker-core --example eval_pose -- recordings/session-XXX.lmk              # variantes du calcul de pose
+cargo run --release -p tracker-core --example eval_expression -- recordings/session-XXX.lmk        # correction des expressions (session de grimaces)
 cargo test -p capture -- --ignored                     # tests matériels (caméra)
 ```
 

@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use capture::{CaptureEvent, CaptureHandle, FormatTarget};
+use tracker_core::expression::{self, ExpressionModel, NUM_FEATURES};
 use tracker_core::processing::{PoseProcessor, Processed, TrackingSettings};
 use tracker_core::{CameraModel, Frame, HeadPose, Pose6, pose};
 use vision::{FaceResult, FaceTracker};
@@ -28,7 +29,12 @@ pub struct FrameOutput {
     pub pose: Option<Pose6>,
     /// Pose filtrée puis passée dans les courbes : ce qui ira au simulateur.
     pub processed: Option<Processed>,
+    /// Mesure de l'expression du visage (pour l'étalonnage).
+    pub expression: Option<[f64; NUM_FEATURES]>,
 }
+
+/// Nombre d'images moyennées pour un recentrage (≈ 0,5 s).
+const RECENTER_FRAMES: usize = 15;
 
 pub enum PipelineEvent {
     Started(String),
@@ -44,7 +50,7 @@ pub enum PipelineEvent {
 
 /// Ordres envoyés par l'UI au pipeline.
 pub enum PipelineCommand {
-    /// La pose courante devient la pose neutre.
+    /// La pose moyenne des prochaines images (≈ 0,5 s) devient la pose neutre.
     Recenter,
     /// Revenir à la pose absolue (par rapport à la caméra).
     ClearNeutral,
@@ -53,6 +59,8 @@ pub enum PipelineCommand {
     /// Nouveaux réglages de filtre et de courbes. En `Box` : la structure
     /// est bien plus grosse que les autres variantes.
     SetSettings(Box<TrackingSettings>),
+    /// Correction des expressions apprise à l'étalonnage (`None` : désactivée).
+    SetExpressionModel(Option<Box<ExpressionModel>>),
 }
 
 pub struct Pipeline {
@@ -83,7 +91,8 @@ impl Pipeline {
                     neutral: None,
                     // Recentrage automatique sur la première pose : une pose absolue
                     // (≈ 60 cm de la caméra) n'a pas de sens dans les courbes.
-                    recenter_requested: true,
+                    recenter: Some(Vec::new()),
+                    expression: None,
                     settings,
                     processor: PoseProcessor::default(),
                     last_pose_at: None,
@@ -122,56 +131,86 @@ impl Drop for Pipeline {
 struct State {
     hfov_deg: f32,
     neutral: Option<HeadPose>,
-    /// Le recentrage s'applique à la prochaine image où la tête est trouvée.
-    recenter_requested: bool,
+    /// Recentrage en cours : poses accumulées, moyennées une fois au complet.
+    recenter: Option<Vec<HeadPose>>,
     settings: TrackingSettings,
     processor: PoseProcessor,
     /// Instant de capture de la dernière image avec une pose (pour le `dt` du filtre).
     last_pose_at: Option<Instant>,
+    expression: Option<ExpressionModel>,
+}
+
+/// Résultats de [`State::pose`] pour une image.
+#[derive(Default)]
+struct PoseOutput {
+    head: Option<HeadPose>,
+    pose: Option<Pose6>,
+    processed: Option<Processed>,
+    expression: Option<[f64; NUM_FEATURES]>,
 }
 
 impl State {
     fn apply(&mut self, command: PipelineCommand) {
         match command {
-            PipelineCommand::Recenter => self.recenter_requested = true,
+            PipelineCommand::Recenter => self.recenter = Some(Vec::new()),
             PipelineCommand::ClearNeutral => {
                 self.neutral = None;
+                self.recenter = None;
                 self.processor.reset();
             }
             PipelineCommand::SetHfov(deg) => {
                 self.hfov_deg = deg;
                 // Changer de focale change les distances : l'ancienne pose neutre
-                // n'a plus de sens, on en reprend une sur la prochaine image.
-                self.recenter_requested = true;
+                // n'a plus de sens, on en reprend une sur les prochaines images.
+                self.neutral = None;
+                self.recenter = Some(Vec::new());
             }
             PipelineCommand::SetSettings(settings) => self.settings = *settings,
+            PipelineCommand::SetExpressionModel(model) => self.expression = model.map(|m| *m),
         }
     }
 
-    fn pose(
-        &mut self,
-        frame: &Frame,
-        face: Option<&FaceResult>,
-    ) -> (Option<HeadPose>, Option<Pose6>, Option<Processed>) {
+    /// Accumule les poses d'un recentrage en cours ; à la dernière, la moyenne
+    /// devient la pose neutre. Sans pose neutre (démarrage), la première pose
+    /// sert de neutre provisoire pour que la sortie parte de 0 tout de suite.
+    fn collect_recenter(&mut self, head: HeadPose) {
+        let Some(poses) = &mut self.recenter else {
+            return;
+        };
+        poses.push(head);
+        if self.neutral.is_none() {
+            self.neutral = Some(head);
+        }
+        if poses.len() >= RECENTER_FRAMES {
+            self.neutral = HeadPose::average(poses);
+            self.recenter = None;
+            self.processor.reset();
+        }
+    }
+
+    fn pose(&mut self, frame: &Frame, face: Option<&FaceResult>) -> PoseOutput {
         let camera = CameraModel {
             width: frame.width as f32,
             height: frame.height as f32,
             hfov_deg: self.hfov_deg,
         };
-        let Some(head) = face
-            .and_then(|f| f.landmarks.as_ref())
-            .and_then(|lm| pose::estimate(lm, &camera))
-        else {
-            return (None, None, None);
+        let landmarks = face.and_then(|f| f.landmarks.as_ref());
+        let features = landmarks.and_then(expression::features);
+        let Some(head) = landmarks.and_then(|lm| pose::estimate(lm, &camera)) else {
+            return PoseOutput {
+                expression: features,
+                ..Default::default()
+            };
         };
-        if std::mem::take(&mut self.recenter_requested) {
-            self.neutral = Some(head);
-            self.processor.reset();
-        }
-        let pose = match &self.neutral {
+        self.collect_recenter(head);
+        let mut pose = match &self.neutral {
             Some(neutral) => head.relative_to(neutral),
             None => head.absolute(),
         };
+        // Correction des expressions : seulement en relatif (elle a été apprise ainsi).
+        if let (Some(model), Some(f), Some(_)) = (&self.expression, &features, &self.neutral) {
+            pose = Pose6::from_array(model.correct(pose.to_array(), f));
+        }
 
         // dt réel entre deux poses (et non 1/30 s supposé) : si une image est
         // sautée ou si le visage a été perdu un instant, le filtre en tient compte.
@@ -180,7 +219,12 @@ impl State {
         });
         self.last_pose_at = Some(frame.captured_at);
         let processed = self.processor.process(&pose, dt, &self.settings);
-        (Some(head), Some(pose), Some(processed))
+        PoseOutput {
+            head: Some(head),
+            pose: Some(pose),
+            processed: Some(processed),
+            expression: features,
+        }
     }
 }
 
@@ -254,7 +298,12 @@ fn run(
             }
             None => None,
         };
-        let (head, pose, processed) = state.pose(&frame, face.as_ref());
+        let PoseOutput {
+            head,
+            pose,
+            processed,
+            expression,
+        } = state.pose(&frame, face.as_ref());
 
         match tx.try_send(PipelineEvent::Frame(Box::new(FrameOutput {
             frame,
@@ -263,6 +312,7 @@ fn run(
             head,
             pose,
             processed,
+            expression,
         }))) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Disconnected(_)) => return,
@@ -287,10 +337,11 @@ mod tests {
         State {
             hfov_deg: HFOV,
             neutral: None,
-            recenter_requested: true,
+            recenter: Some(Vec::new()),
             settings: TrackingSettings::default(),
             processor: PoseProcessor::default(),
             last_pose_at: None,
+            expression: None,
         }
     }
 
@@ -319,8 +370,8 @@ mod tests {
             detect_ms: 0.0,
             landmarks_ms: 0.0,
         };
-        let (_, pose, processed) = state.pose(&frame, Some(&face));
-        (pose, processed)
+        let out = state.pose(&frame, Some(&face));
+        (out.pose, out.processed)
     }
 
     #[test]
@@ -334,6 +385,50 @@ mod tests {
         );
         let (next, _) = observe(&mut s, 30.0, t0 + Duration::from_millis(33));
         assert!((next.unwrap().angles.yaw - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn le_recentrage_fait_la_moyenne_de_plusieurs_images() {
+        let mut s = state();
+        let t0 = Instant::now();
+        // Lacet qui oscille entre 18° et 22° pendant le recentrage : le zéro doit
+        // être leur moyenne (20°), pas la première image (18°).
+        for i in 0..RECENTER_FRAMES {
+            let yaw = if i % 2 == 0 { 18.0 } else { 22.0 };
+            observe(&mut s, yaw, t0 + Duration::from_millis(33 * i as u64));
+        }
+        assert!(s.recenter.is_none(), "recentrage terminé");
+        let (pose, _) = observe(&mut s, 30.0, t0 + Duration::from_secs(1));
+        let yaw = pose.unwrap().angles.yaw;
+        // 15 images : 8 à 18°, 7 à 22° → moyenne 19,87°.
+        assert!((yaw - (30.0 - 19.87)).abs() < 0.05, "lacet relatif {yaw}");
+    }
+
+    #[test]
+    fn la_correction_des_expressions_est_appliquee() {
+        let mut s = state();
+        let t0 = Instant::now();
+        observe(&mut s, 0.0, t0);
+        // Modèle factice : décale le lacet de 100°/unité d'ouverture de bouche, et
+        // l'expression mesurée sur ce visage synthétique sert de neutre → 0 décalage.
+        let camera = CameraModel {
+            width: 1920.0,
+            height: 1080.0,
+            hfov_deg: HFOV,
+        };
+        let lm = synthetic_landmarks(&camera, Angles::default(), Vector3::new(0.0, 0.0, -60.0));
+        let neutral = expression::features(&lm).unwrap();
+        let mut coeffs = [[0.0; NUM_FEATURES]; 6];
+        coeffs[0][0] = 100.0;
+        let model = ExpressionModel {
+            neutral: [neutral[0] - 0.01, neutral[1], neutral[2]],
+            coeffs,
+            max_correction: [5.0; 6],
+        };
+        s.apply(PipelineCommand::SetExpressionModel(Some(Box::new(model))));
+        let (pose, _) = observe(&mut s, 0.0, t0 + Duration::from_millis(33));
+        // Expression « bouche ouverte de 0,01 » par rapport au neutre → −1° de correction.
+        assert!((pose.unwrap().angles.yaw + 1.0).abs() < 1e-3);
     }
 
     #[test]
@@ -352,7 +447,7 @@ mod tests {
         let t0 = Instant::now();
         observe(&mut s, 0.0, t0);
         s.apply(PipelineCommand::SetHfov(80.0));
-        assert!(s.recenter_requested);
+        assert!(s.recenter.is_some());
         let (pose, _) = observe(&mut s, 15.0, t0 + Duration::from_millis(33));
         assert!(
             pose.unwrap().angles.yaw.abs() < 1e-6,
@@ -380,8 +475,9 @@ mod tests {
     fn pas_de_pose_sans_visage() {
         let mut s = state();
         let frame = gray_frame(640, 480, 0, Instant::now());
-        assert!(matches!(s.pose(&frame, None), (None, None, None)));
-        assert!(s.recenter_requested, "le recentrage attend un vrai visage");
+        let out = s.pose(&frame, None);
+        assert!(out.head.is_none() && out.pose.is_none() && out.processed.is_none());
+        assert!(s.recenter.is_some(), "le recentrage attend un vrai visage");
     }
 
     #[test]

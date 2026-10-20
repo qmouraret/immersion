@@ -10,7 +10,7 @@
 use std::f64::consts::TAU;
 
 /// Paramètres du filtre.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OneEuroParams {
     /// Fréquence de coupure à l'arrêt, en Hz.
     pub min_cutoff: f64,

@@ -9,8 +9,10 @@
 
 pub mod autotune;
 pub mod blazeface;
+pub mod calibration;
 pub mod canonical_face;
 pub mod curve;
+pub mod expression;
 pub mod face;
 pub mod filter;
 mod frame;

@@ -12,7 +12,7 @@
 //!   lacet+ = tourner la tête à droite, tangage+ = lever la tête,
 //!   roulis+ = pencher la tête vers l'épaule droite.
 
-use nalgebra::{Matrix3, Rotation3, Unit, Vector3};
+use nalgebra::{Matrix3, Quaternion, Rotation3, Unit, UnitQuaternion, Vector3, Vector4};
 
 use crate::FaceLandmarks;
 use crate::canonical_face::CANONICAL_FACE;
@@ -198,6 +198,9 @@ pub struct HeadPose {
     pub image_fit: Similarity,
     /// Erreur moyenne de reprojection des points retenus, en pixels.
     pub residual_px: f64,
+    /// Échelle (px/cm) qui a servi à calculer la distance : `distance = focale / échelle`.
+    /// Sert à l'étalonnage du FOV à partir d'une distance mesurée.
+    pub depth_scale: f64,
 }
 
 impl HeadPose {
@@ -206,11 +209,43 @@ impl HeadPose {
         to_user(&self.rotation, &self.position)
     }
 
-    /// Pose relative à une pose neutre (« recentrage »).
+    /// Pose relative à une pose neutre (« recentrage »), exprimée dans le
+    /// **repère de la tête neutre**.
+    ///
+    /// Hypothèse : au recentrage, l'utilisateur fait face à l'écran. Le repère
+    /// de sa tête à cet instant est donc celui de l'écran, et exprimer les
+    /// mouvements dans ce repère (`R₀ᵀ·R`, `R₀ᵀ·(p − p₀)`) corrige à lui seul la
+    /// position et l'inclinaison de la caméra : une webcam posée de côté ou en
+    /// contrebas donne les mêmes axes qu'une webcam en face.
     pub fn relative_to(&self, neutral: &HeadPose) -> Pose6 {
-        // Rotation effectuée depuis la pose neutre, exprimée dans le repère caméra.
-        let delta = self.rotation * neutral.rotation.inverse();
-        to_user(&delta, &(self.position - neutral.position))
+        let to_screen = neutral.rotation.inverse();
+        let delta = to_screen * self.rotation;
+        to_user(&delta, &(to_screen * (self.position - neutral.position)))
+    }
+
+    /// Pose moyenne de plusieurs mesures (recentrage plus stable qu'une seule image).
+    ///
+    /// Positions : moyenne simple. Rotations : moyenne des quaternions (valable
+    /// pour des rotations proches, ce qui est le cas d'une tête immobile),
+    /// alignés sur le premier car `q` et `−q` représentent la même rotation.
+    pub fn average(poses: &[HeadPose]) -> Option<HeadPose> {
+        let first = poses.first()?;
+        let q0 = UnitQuaternion::from_rotation_matrix(&first.rotation);
+        let mut sum = Vector4::zeros();
+        for p in poses {
+            let q = UnitQuaternion::from_rotation_matrix(&p.rotation)
+                .into_inner()
+                .coords;
+            sum += if q.dot(&q0.coords) < 0.0 { -q } else { q };
+        }
+        let mean = UnitQuaternion::from_quaternion(Quaternion::from_vector(sum));
+        let n = poses.len() as f64;
+        Some(HeadPose {
+            rotation: mean.to_rotation_matrix(),
+            position: poses.iter().map(|p| p.position).sum::<Vector3<f64>>() / n,
+            depth_scale: poses.iter().map(|p| p.depth_scale).sum::<f64>() / n,
+            ..*poses.last()?
+        })
     }
 
     /// Position à l'écran (pixels image) d'un point du modèle, en cm.
@@ -389,6 +424,7 @@ pub fn estimate_with(
         position,
         image_fit: fit,
         residual_px,
+        depth_scale: scale,
     })
 }
 
@@ -640,6 +676,81 @@ mod tests {
     }
 
     #[test]
+    fn camera_de_cote_meme_axes_qu_en_face() {
+        // Webcam déportée : la tête est à 40 cm sur la gauche de l'image, et
+        // tournée de 30° pour faire face à l'écran (donc pas à la caméra).
+        let camera_offset = Vector3::new(-30.0, 0.0, -52.0);
+        let facing_screen = Angles {
+            yaw: 30.0,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        let neutral = estimate(&synthetic(facing_screen, camera_offset), &CAMERA).unwrap();
+
+        // Tourner de 20° à droite *par rapport à l'écran* : lacet 50° vu de la caméra.
+        let turned = Angles {
+            yaw: 50.0,
+            ..facing_screen
+        };
+        let rel = estimate(&synthetic(turned, camera_offset), &CAMERA)
+            .unwrap()
+            .relative_to(&neutral);
+        assert_close(rel.angles.yaw, 20.0, 1e-3, "lacet par rapport à l'écran");
+        assert_close(rel.angles.pitch, 0.0, 1e-3, "pas de tangage parasite");
+        assert_close(rel.angles.roll, 0.0, 1e-3, "pas de roulis parasite");
+
+        // Se décaler de 10 cm vers sa droite *par rapport à l'écran* : c'est −x dans
+        // le repère de la tête neutre (x tête = gauche de la personne), ramené en repère caméra.
+        let right_of_screen = neutral.rotation * Vector3::new(-10.0, 0.0, 0.0); // −x tête = droite
+        let moved = estimate(
+            &synthetic(facing_screen, camera_offset + right_of_screen),
+            &CAMERA,
+        )
+        .unwrap()
+        .relative_to(&neutral);
+        assert_close(moved.x, 10.0, 1e-2, "x par rapport à l'écran");
+        assert_close(moved.z, 0.0, 1e-2, "pas de z parasite");
+        assert_close(
+            moved.angles.yaw,
+            0.0,
+            0.2,
+            "lacet ≈ inchangé (petite parallaxe)",
+        );
+    }
+
+    #[test]
+    fn moyenne_de_poses() {
+        let a = estimate(
+            &synthetic(
+                Angles {
+                    yaw: 10.0,
+                    ..Default::default()
+                },
+                Vector3::new(0.0, 0.0, -60.0),
+            ),
+            &CAMERA,
+        )
+        .unwrap();
+        let b = estimate(
+            &synthetic(
+                Angles {
+                    yaw: 14.0,
+                    ..Default::default()
+                },
+                Vector3::new(2.0, 0.0, -62.0),
+            ),
+            &CAMERA,
+        )
+        .unwrap();
+        let mean = HeadPose::average(&[a, b]).unwrap();
+        let angles = Angles::from_rotation(&mean.rotation);
+        assert_close(angles.yaw, 12.0, 0.05, "lacet moyen");
+        assert_close(mean.position.x, 1.0, 0.05, "x moyen");
+        assert_close(mean.position.z, -61.0, 0.05, "z moyen");
+        assert!(HeadPose::average(&[]).is_none());
+    }
+
+    #[test]
     fn recentrage() {
         let neutral = estimate(
             &synthetic(
@@ -665,6 +776,19 @@ mod tests {
         .unwrap();
         let rel = now.relative_to(&neutral);
         assert_close(rel.angles.yaw, 30.0, 1e-4, "lacet relatif");
-        assert_close(rel.z, -10.0, 1e-4, "s'approcher = z négatif");
+        // S'approcher de 10 cm de la caméra, vu depuis une tête neutre tournée de 5° :
+        // surtout « avancer » (z < 0), et un peu « vers la gauche » de la tête.
+        assert_close(
+            rel.z,
+            -10.0 * 5f64.to_radians().cos(),
+            1e-4,
+            "s'approcher = z négatif",
+        );
+        assert_close(
+            rel.x,
+            -10.0 * 5f64.to_radians().sin(),
+            1e-4,
+            "composante latérale",
+        );
     }
 }

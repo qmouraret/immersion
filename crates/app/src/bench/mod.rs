@@ -39,15 +39,17 @@ pub enum Tab {
     Scene,
     Plots,
     Recordings,
+    Calibration,
 }
 
 impl Tab {
-    pub const ALL: [(Tab, &'static str); 5] = [
+    pub const ALL: [(Tab, &'static str); 6] = [
         (Tab::Camera, "Caméra"),
         (Tab::Target, "Mire"),
         (Tab::Scene, "Scène 3D"),
         (Tab::Plots, "Courbes"),
         (Tab::Recordings, "Enregistrements"),
+        (Tab::Calibration, "Étalonnage"),
     ];
 }
 
@@ -107,7 +109,7 @@ impl Bench {
     ) -> Option<(AxisGroup, OneEuroParams)> {
         let latest = self.history.back().copied();
         match tab {
-            Tab::Camera => {} // affiché par la vue caméra
+            Tab::Camera | Tab::Calibration => {} // affichés par la vue principale
             Tab::Target => self.target.ui(ui, latest.as_ref(), settings),
             Tab::Scene => self.scene.ui(ui, latest.as_ref()),
             Tab::Plots => self.plots.ui(ui, &self.history),

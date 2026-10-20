@@ -8,7 +8,11 @@ use crate::filter::{OneEuro, OneEuroParams};
 pub const AXES: [&str; 6] = ["Lacet", "Tangage", "Roulis", "X", "Y", "Z"];
 
 /// Tous les réglages du traitement.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `#[serde(default)]` : un profil écrit par une version antérieure (champ
+/// absent) reste lisible, le champ manquant prend sa valeur par défaut.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TrackingSettings {
     /// Si `false`, le filtre est contourné (pose brute).
     pub filter_enabled: bool,

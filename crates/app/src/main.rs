@@ -1,8 +1,10 @@
 //! Immersion — head tracking webcam pour MSFS 2024.
 
 mod bench;
+mod calibration;
 mod camera_view;
 mod pipeline;
+mod profile;
 mod tuning;
 
 use std::path::PathBuf;

@@ -338,3 +338,46 @@ Ce qui est en place :
 - **Courbes** : zone morte de 2° pour le tangage et courbe plus douce (25° de tête → 60° de vue), zone morte
   de 1° pour le lacet. L'écart de sortie au repos passe de 2,93° à 0,58° pour le tangage, et de 0,95° à
   0,63° pour le lacet.
+
+## Phase 5 — Étalonnage et profils
+
+Onglet **Étalonnage**, cinq étapes que l'on peut refaire séparément :
+
+| Étape | Ce qu'elle fait | Comment |
+|---|---|---|
+| 1. Champ de vision | Calcule le FOV de la caméra | Distance objectif → racine du nez mesurée au mètre ; l'échelle de la pose donne la focale (`calibration::hfov_from_distance`) |
+| 2. Posture neutre | Définit le repère de l'écran | Recentrage **moyenné sur 0,5 s**, face à l'écran |
+| 3. Amplitudes | Ajuste les courbes du lacet et du tangage | 10 s de balayage ; l'« entrée max. » est réglée sur les 5ᵉ et 95ᵉ centiles |
+| 4. Expressions (facultatif) | Corrige les décalages dus au visage | 18 s de grimaces, tête immobile, puis régression linéaire par axe (`expression::fit`), à valider après avoir vu son effet |
+| 5. Profil | Sauvegarde tout pour cette webcam | `~/Library/Application Support/immersion/profiles/<webcam>.toml`, rechargé au démarrage |
+
+### Webcam déportée : le repère de l'écran
+
+La pose relative est exprimée dans le **repère de la tête au moment du recentrage** (`R₀ᵀ·R` et
+`R₀ᵀ·(p − p₀)`), et non plus dans celui de la caméra. Si l'on fait face à l'écran au recentrage, ce
+repère est celui de l'écran : une webcam posée de côté ou en contrebas donne les mêmes axes qu'une webcam
+en face. Le test `camera_de_cote_meme_axes_qu_en_face` le vérifie avec une caméra à 30° sur le côté.
+
+### Correction des expressions, mesurée
+
+Sur une session de grimaces, en plus du calcul hybride de la distance, la correction réduit l'écart au
+repos de 48 % pour Z, de 24 % pour le tangage et d'environ 20 % pour X et Y
+(`examples/eval_expression`). Le lacet et le roulis ne sont pas corrigés : la correction est appliquée
+à un axe seulement si elle réduit son écart d'au moins 10 %. Elle est aussi bornée à 1,5 fois le
+décalage maximal vu pendant l'étalonnage.
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| `serde` : `#[derive(Serialize, Deserialize)]`, `#[serde(default)]` pour la compatibilité ascendante | `profile::Profile`, `processing::TrackingSettings` |
+| Quaternions pour moyenner des rotations (`q` et `−q` : même rotation) | `HeadPose::average` |
+| Résoudre un petit système linéaire avec `nalgebra` (`Matrix4::lu().solve`) | `expression::fit` |
+| Un module qui renvoie des *actions* plutôt que de modifier l'état d'autrui (testable sans UI) | `calibration::CalibAction` |
+| `anyhow::Context` pour des erreurs de fichier lisibles (`{e:#}` affiche toute la chaîne) | `profile::load_from` |
+| `Option<Vec<_>>` comme état « collecte en cours » | `State::collect_recenter` |
+
+### Exercices facultatifs
+
+1. Ajouter à l'étape 1 une saisie manuelle du FOV (fiche technique de la webcam) à la place de la mesure.
+2. Proposer une liste des profils enregistrés, avec un bouton pour en supprimer un.

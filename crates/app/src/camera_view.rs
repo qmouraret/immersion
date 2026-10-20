@@ -15,7 +15,9 @@ use tracker_core::{HeadPose, Pose6};
 use vision::{FaceResult, TrackMode};
 
 use crate::bench::{Bench, Sample, Tab};
+use crate::calibration::{CalibAction, CalibSample, Calibration};
 use crate::pipeline::{FrameOutput, Pipeline, PipelineCommand, PipelineEvent};
+use crate::profile::{self, Profile};
 use crate::tuning::Tuning;
 
 /// Champ de vision horizontal par défaut, à ajuster (étalonnage en phase 5).
@@ -88,6 +90,11 @@ pub struct CameraView {
     tab: Tab,
     /// Origine des temps du banc de test.
     started_at: Instant,
+    calibration: Calibration,
+    /// Correction des expressions active (pour l'enregistrer dans le profil).
+    expression_model: Option<tracker_core::expression::ExpressionModel>,
+    /// Fichier du profil de la webcam courante (chargé ou enregistré).
+    profile_path: Option<String>,
     /// Fenêtres glissantes d'une seconde par axe, avant et après le filtre.
     jitter_raw: [Rolling; 6],
     jitter_filtered: [Rolling; 6],
@@ -117,6 +124,9 @@ impl CameraView {
             bench: Bench::new(PathBuf::from("recordings")),
             tab: Tab::Camera,
             started_at: Instant::now(),
+            calibration: Calibration::default(),
+            expression_model: None,
+            profile_path: None,
             jitter_raw: std::array::from_fn(|_| Rolling::new(30)),
             jitter_filtered: std::array::from_fn(|_| Rolling::new(30)),
             format: None,
@@ -144,6 +154,8 @@ impl CameraView {
     }
 
     fn open(&mut self, index: u32) {
+        self.selected = Some(index);
+        self.load_profile();
         // Remplacer l'Option détruit l'ancien pipeline → son `Drop` arrête
         // l'ancien thread (et donc la caméra) avant d'ouvrir la nouvelle.
         self.pipeline = None;
@@ -153,7 +165,11 @@ impl CameraView {
             self.hfov_deg,
             self.tuning.settings.clone(),
         ));
-        self.selected = Some(index);
+        if let Some(model) = &self.expression_model {
+            self.send(PipelineCommand::SetExpressionModel(Some(Box::new(
+                model.clone(),
+            ))));
+        }
         self.format = None;
         self.error = None;
         self.face = None;
@@ -195,6 +211,13 @@ impl CameraView {
                             landmarks: lm.clone(),
                         });
                     }
+                    self.calibration.push(&CalibSample {
+                        t,
+                        depth_scale: output.head.map(|h| h.depth_scale),
+                        image_width: output.frame.width as f32,
+                        pose: output.pose,
+                        expression: output.expression,
+                    });
                     if let (Some(pose), Some(p)) = (output.pose, output.processed) {
                         self.bench.push(Sample {
                             t,
@@ -227,6 +250,7 @@ impl CameraView {
                 head,
                 pose,
                 processed,
+                expression: _,
             } = *output;
             let upload_start = Instant::now();
             let size = [frame.width as usize, frame.height as usize];
@@ -264,6 +288,81 @@ impl CameraView {
     fn reset_jitter(&mut self) {
         self.jitter_raw.iter_mut().for_each(Rolling::clear);
         self.jitter_filtered.iter_mut().for_each(Rolling::clear);
+    }
+
+    /// Nom de la webcam courante (sert à nommer son profil).
+    fn camera_name(&self) -> String {
+        self.cameras
+            .iter()
+            .find(|c| Some(c.index) == self.selected)
+            .map_or_else(|| "caméra".to_owned(), |c| c.name.clone())
+    }
+
+    /// Charge le profil de la webcam courante, s'il existe (sinon : valeurs par défaut).
+    fn load_profile(&mut self) {
+        let camera = self.camera_name();
+        let Some(dir) = profile::profiles_dir() else {
+            return;
+        };
+        match profile::load_from(&dir, &camera) {
+            Ok(Some(p)) => {
+                self.hfov_deg = p.hfov_deg;
+                self.tuning.settings = p.settings;
+                self.expression_model = p.expression;
+                self.profile_path = Some(profile::path_for(&dir, &camera).display().to_string());
+                tracing::info!("profil chargé pour « {camera} »");
+            }
+            Ok(None) => {
+                self.hfov_deg = DEFAULT_HFOV_DEG;
+                self.tuning.settings = TrackingSettings::default();
+                self.expression_model = None;
+                self.profile_path = None;
+            }
+            // Profil illisible : on le signale et on garde les valeurs par défaut.
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn save_profile(&mut self) {
+        let profile = Profile {
+            camera: self.camera_name(),
+            hfov_deg: self.hfov_deg,
+            settings: self.tuning.settings.clone(),
+            expression: self.expression_model.clone(),
+        };
+        let Some(dir) = profile::profiles_dir() else {
+            self.error = Some("dossier de configuration introuvable".into());
+            return;
+        };
+        match profile::save_to(&dir, &profile) {
+            Ok(path) => self.profile_path = Some(path.display().to_string()),
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Applique une action demandée par l'assistant d'étalonnage.
+    fn apply_calibration(&mut self, action: CalibAction) {
+        match action {
+            CalibAction::SetHfov(hfov) => {
+                self.hfov_deg = hfov;
+                self.send(PipelineCommand::SetHfov(hfov));
+                self.reset_jitter();
+            }
+            CalibAction::Recenter => self.recenter(),
+            CalibAction::SetCurveInputs { yaw, pitch } => {
+                // L'entrée max. doit rester au-delà de la zone morte.
+                let curves = &mut self.tuning.settings.curves;
+                curves[0].input = yaw.max(curves[0].deadzone + 1.0);
+                curves[1].input = pitch.max(curves[1].deadzone + 1.0);
+                let settings = Box::new(self.tuning.settings.clone());
+                self.send(PipelineCommand::SetSettings(settings));
+            }
+            CalibAction::SetExpression(model) => {
+                self.send(PipelineCommand::SetExpressionModel(model.clone()));
+                self.expression_model = model.map(|m| *m);
+            }
+            CalibAction::SaveProfile => self.save_profile(),
+        }
     }
 
     fn send(&self, command: PipelineCommand) {
@@ -531,8 +630,12 @@ impl eframe::App for CameraView {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_pipeline(ctx);
 
-        // Barre d'espace : recentrer (quand aucun champ de texte n'a le focus).
-        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        // Barre d'espace : recentrer (quand aucun champ de texte n'a le focus,
+        // et pas pendant une mesure d'étalonnage, qu'un recentrage fausserait).
+        if !ctx.egui_wants_keyboard_input()
+            && !self.calibration.is_capturing()
+            && ctx.input(|i| i.key_pressed(egui::Key::Space))
+        {
             self.recenter();
         }
 
@@ -577,6 +680,14 @@ impl eframe::App for CameraView {
             ui.separator();
             match self.tab {
                 Tab::Camera => self.camera_image(ui),
+                Tab::Calibration => {
+                    let actions =
+                        self.calibration
+                            .ui(ui, &self.camera_name(), self.profile_path.as_deref());
+                    for action in actions {
+                        self.apply_calibration(action);
+                    }
+                }
                 tab => {
                     if let Some((group, params)) = self.bench.ui(ui, tab, &self.tuning.settings) {
                         match group {
