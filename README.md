@@ -188,3 +188,44 @@ cargo run -p tracker-core --example bench_sample # coût du recadrage
    réutilisée, comme le tampon de `FaceTracker`, et mesurer la différence (indice : elle sera faible ;
    pourquoi ?).
 2. Afficher en rouge les points écartés par le second passage robuste.
+
+## Phase 3 — Lissage et courbes de réponse
+
+### Chaîne de traitement
+
+```
+pose brute ─▶ recentrage ─▶ One-Euro (par axe) ─▶ zone morte + courbe ─▶ sortie
+```
+
+- **One-Euro** (`tracker-core/src/filter.rs`) : un passe-bas dont la fréquence de coupure monte avec
+  la vitesse. À l'arrêt, il lisse fortement ; en mouvement, il n'ajoute presque pas de retard.
+  Il utilise le **dt réel** entre deux images, et non un 1/30 s supposé.
+- **Courbe** (`tracker-core/src/curve.rs`) : zone morte, entrée max., sortie max. et expo, pour chaque axe.
+  Avec un seul écran : 40° de tête → 180° de vue (expo 1,6), et le roulis reste à 1:1.
+- Chaque **recentrage** remet les filtres à zéro, sinon la vue glisserait lentement vers le nouveau zéro.
+
+### Régler
+
+Panneau de droite :
+- **± brut / ± filtré** : gigue sur 1 s. Objectif : moins de 0,05° à l'arrêt.
+- **Coupure min.** : plus basse, l'image est plus stable à l'arrêt mais « traîne ». **β** : plus haut, le
+  retard diminue dans les mouvements rapides, mais un peu de gigue revient.
+- La courbe de l'axe sélectionné est tracée, avec la position actuelle de la tête en orange.
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| `Option<(f64, f64)>` comme état « pas encore initialisé » | `OneEuro` |
+| `std::array::from_fn` pour traiter les 6 axes sans boucle mutable | `PoseProcessor::process` |
+| `f64::copysign`, `clamp`, `powf` | `AxisCurve::apply` |
+| Déstructuration de tableau `let [a, b, ..] = v` | `Pose6::from_array` |
+| Module d'UI séparé qui renvoie « a changé ? » (`bool`) | `app/src/tuning.rs` |
+| Dessin libre avec `Painter` (courbe, repère) | `tuning::draw_curve` |
+
+### Exercices facultatifs
+
+1. Ajouter un réglage « temps de retour au centre » : si le visage est perdu plus d'une seconde,
+   ramener progressivement la sortie à 0 plutôt que de la figer.
+2. Écrire un test qui mesure le **retard en millisecondes** du filtre sur une rampe, pour plusieurs
+   valeurs de β, et l'afficher avec `cargo test -- --nocapture`.

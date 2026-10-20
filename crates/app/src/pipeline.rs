@@ -9,9 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capture::{CaptureEvent, CaptureHandle, FormatTarget};
+use tracker_core::processing::{PoseProcessor, Processed, TrackingSettings};
 use tracker_core::{CameraModel, Frame, HeadPose, Pose6, pose};
 use vision::{FaceResult, FaceTracker};
 
@@ -25,6 +26,8 @@ pub struct FrameOutput {
     pub head: Option<HeadPose>,
     /// Pose relative à la pose neutre (ou absolue si aucun recentrage).
     pub pose: Option<Pose6>,
+    /// Pose filtrée puis passée dans les courbes : ce qui ira au simulateur.
+    pub processed: Option<Processed>,
 }
 
 pub enum PipelineEvent {
@@ -47,6 +50,9 @@ pub enum PipelineCommand {
     ClearNeutral,
     /// Champ de vision horizontal de la caméra, en degrés.
     SetHfov(f32),
+    /// Nouveaux réglages de filtre et de courbes. En `Box` : la structure
+    /// est bien plus grosse que les autres variantes.
+    SetSettings(Box<TrackingSettings>),
 }
 
 pub struct Pipeline {
@@ -57,7 +63,12 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn start(camera: u32, models_dir: PathBuf, hfov_deg: f32) -> Self {
+    pub fn start(
+        camera: u32,
+        models_dir: PathBuf,
+        hfov_deg: f32,
+        settings: TrackingSettings,
+    ) -> Self {
         let (tx, events) = mpsc::sync_channel(2);
         // Canal non borné pour les commandes : il y en a peu, et l'UI ne doit
         // jamais bloquer en les envoyant.
@@ -70,7 +81,12 @@ impl Pipeline {
                 let state = State {
                     hfov_deg,
                     neutral: None,
-                    recenter_requested: false,
+                    // Recentrage automatique sur la première pose : une pose absolue
+                    // (≈ 60 cm de la caméra) n'a pas de sens dans les courbes.
+                    recenter_requested: true,
+                    settings,
+                    processor: PoseProcessor::default(),
+                    last_pose_at: None,
                 };
                 run(camera, models_dir, state, &tx, &rx_commands, &stop_thread);
             })
@@ -108,18 +124,27 @@ struct State {
     neutral: Option<HeadPose>,
     /// Le recentrage s'applique à la prochaine image où la tête est trouvée.
     recenter_requested: bool,
+    settings: TrackingSettings,
+    processor: PoseProcessor,
+    /// Instant de capture de la dernière image avec une pose (pour le `dt` du filtre).
+    last_pose_at: Option<Instant>,
 }
 
 impl State {
     fn apply(&mut self, command: PipelineCommand) {
         match command {
             PipelineCommand::Recenter => self.recenter_requested = true,
-            PipelineCommand::ClearNeutral => self.neutral = None,
+            PipelineCommand::ClearNeutral => {
+                self.neutral = None;
+                self.processor.reset();
+            }
             PipelineCommand::SetHfov(deg) => {
                 self.hfov_deg = deg;
-                // Changer de focale change les distances : l'ancienne pose neutre n'a plus de sens.
-                self.neutral = None;
+                // Changer de focale change les distances : l'ancienne pose neutre
+                // n'a plus de sens, on en reprend une sur la prochaine image.
+                self.recenter_requested = true;
             }
+            PipelineCommand::SetSettings(settings) => self.settings = *settings,
         }
     }
 
@@ -127,7 +152,7 @@ impl State {
         &mut self,
         frame: &Frame,
         face: Option<&FaceResult>,
-    ) -> (Option<HeadPose>, Option<Pose6>) {
+    ) -> (Option<HeadPose>, Option<Pose6>, Option<Processed>) {
         let camera = CameraModel {
             width: frame.width as f32,
             height: frame.height as f32,
@@ -137,16 +162,25 @@ impl State {
             .and_then(|f| f.landmarks.as_ref())
             .and_then(|lm| pose::estimate(lm, &camera))
         else {
-            return (None, None);
+            return (None, None, None);
         };
         if std::mem::take(&mut self.recenter_requested) {
             self.neutral = Some(head);
+            self.processor.reset();
         }
         let pose = match &self.neutral {
             Some(neutral) => head.relative_to(neutral),
             None => head.absolute(),
         };
-        (Some(head), Some(pose))
+
+        // dt réel entre deux poses (et non 1/30 s supposé) : si une image est
+        // sautée ou si le visage a été perdu un instant, le filtre en tient compte.
+        let dt = self.last_pose_at.map_or(0.0, |t| {
+            frame.captured_at.saturating_duration_since(t).as_secs_f64()
+        });
+        self.last_pose_at = Some(frame.captured_at);
+        let processed = self.processor.process(&pose, dt, &self.settings);
+        (Some(head), Some(pose), Some(processed))
     }
 }
 
@@ -220,7 +254,7 @@ fn run(
             }
             None => None,
         };
-        let (head, pose) = state.pose(&frame, face.as_ref());
+        let (head, pose, processed) = state.pose(&frame, face.as_ref());
 
         match tx.try_send(PipelineEvent::Frame(Box::new(FrameOutput {
             frame,
@@ -228,6 +262,7 @@ fn run(
             face,
             head,
             pose,
+            processed,
         }))) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Disconnected(_)) => return,

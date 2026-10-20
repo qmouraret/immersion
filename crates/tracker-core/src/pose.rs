@@ -155,6 +155,24 @@ pub struct Pose6 {
     pub z: f64,
 }
 
+impl Pose6 {
+    /// [lacet, tangage, roulis, x, y, z] : pratique pour traiter les axes en boucle.
+    pub fn to_array(&self) -> [f64; 6] {
+        let a = &self.angles;
+        [a.yaw, a.pitch, a.roll, self.x, self.y, self.z]
+    }
+
+    pub fn from_array(v: [f64; 6]) -> Self {
+        let [yaw, pitch, roll, x, y, z] = v;
+        Self {
+            angles: Angles { yaw, pitch, roll },
+            x,
+            y,
+            z,
+        }
+    }
+}
+
 /// Résultat de l'estimation de pose pour une image.
 #[derive(Debug, Clone, Copy)]
 pub struct HeadPose {

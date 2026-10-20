@@ -6,9 +6,12 @@
 
 pub mod blazeface;
 pub mod canonical_face;
+pub mod curve;
 pub mod face;
+pub mod filter;
 mod frame;
 pub mod pose;
+pub mod processing;
 mod roi;
 pub mod stats;
 pub mod tensor;

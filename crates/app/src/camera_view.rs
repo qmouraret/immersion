@@ -7,11 +7,13 @@ use capture::CameraInfo;
 use eframe::egui::{self, Color32, ColorImage, Pos2, Stroke, TextureHandle, TextureOptions};
 use nalgebra::Vector3;
 use tracker_core::face::index;
+use tracker_core::processing::{Processed, TrackingSettings};
 use tracker_core::stats::Rolling;
 use tracker_core::{HeadPose, Pose6};
 use vision::{FaceResult, TrackMode};
 
 use crate::pipeline::{FrameOutput, Pipeline, PipelineCommand, PipelineEvent};
+use crate::tuning::Tuning;
 
 /// Champ de vision horizontal par défaut, à ajuster (étalonnage en phase 5).
 const DEFAULT_HFOV_DEG: f32 = 66.0;
@@ -77,8 +79,11 @@ pub struct CameraView {
     /// La pose affichée est-elle relative à une pose neutre ?
     recentered: bool,
     hfov_deg: f32,
-    /// Fenêtre glissante d'une seconde par axe (lacet, tangage, roulis, x, y, z).
-    jitter: [Rolling; 6],
+    processed: Option<Processed>,
+    tuning: Tuning,
+    /// Fenêtres glissantes d'une seconde par axe, avant et après le filtre.
+    jitter_raw: [Rolling; 6],
+    jitter_filtered: [Rolling; 6],
     /// Format négocié, déjà mis en forme pour l'affichage.
     format: Option<String>,
     error: Option<String>,
@@ -100,7 +105,10 @@ impl CameraView {
             pose: None,
             recentered: false,
             hfov_deg: DEFAULT_HFOV_DEG,
-            jitter: std::array::from_fn(|_| Rolling::new(30)),
+            processed: None,
+            tuning: Tuning::new(TrackingSettings::default()),
+            jitter_raw: std::array::from_fn(|_| Rolling::new(30)),
+            jitter_filtered: std::array::from_fn(|_| Rolling::new(30)),
             format: None,
             error: None,
             stats: Stats::default(),
@@ -133,6 +141,7 @@ impl CameraView {
             index,
             self.models_dir.clone(),
             self.hfov_deg,
+            self.tuning.settings.clone(),
         ));
         self.selected = Some(index);
         self.format = None;
@@ -140,7 +149,7 @@ impl CameraView {
         self.face = None;
         self.head = None;
         self.pose = None;
-        self.recentered = false;
+        self.recentered = true; // le pipeline recentre sur la première pose
         self.reset_jitter();
         self.stats = Stats::default();
     }
@@ -178,6 +187,7 @@ impl CameraView {
                 face,
                 head,
                 pose,
+                processed,
             } = *output;
             let upload_start = Instant::now();
             let size = [frame.width as usize, frame.height as usize];
@@ -199,10 +209,12 @@ impl CameraView {
             self.face = face;
             self.head = head;
             self.pose = pose;
-            if let Some(p) = pose {
-                let values = [p.angles.yaw, p.angles.pitch, p.angles.roll, p.x, p.y, p.z];
-                for (r, v) in self.jitter.iter_mut().zip(values) {
-                    r.push(v);
+            self.processed = processed;
+            if let (Some(p), Some(f)) = (pose, processed) {
+                let (raw, filtered) = (p.to_array(), f.filtered.to_array());
+                for i in 0..6 {
+                    self.jitter_raw[i].push(raw[i]);
+                    self.jitter_filtered[i].push(filtered[i]);
                 }
             }
         }
@@ -211,7 +223,8 @@ impl CameraView {
     /// Les valeurs sautent (recentrage, autre focale) : les anciennes mesures
     /// ne veulent plus rien dire.
     fn reset_jitter(&mut self) {
-        self.jitter.iter_mut().for_each(Rolling::clear);
+        self.jitter_raw.iter_mut().for_each(Rolling::clear);
+        self.jitter_filtered.iter_mut().for_each(Rolling::clear);
     }
 
     fn send(&self, command: PipelineCommand) {
@@ -233,25 +246,40 @@ impl CameraView {
                 ui.label("—");
             }
             Some(_) => {
-                // Moyenne sur 1 s (lisible) et écart-type (la gigue) : les valeurs
-                // brutes changent trop vite pour être lues à l'œil.
-                ui.label("Moyenne sur 1 s   ± gigue (écart-type)");
+                // Sortie : ce qui ira au simulateur (filtré + courbe).
+                // Gigue : écart-type sur 1 s, avant et après le filtre.
                 let names = [
-                    ("Lacet (droite +)", "°"),
-                    ("Tangage (haut +)", "°"),
-                    ("Roulis (droite +)", "°"),
-                    ("X (droite +)", "cm"),
-                    ("Y (haut +)", "cm"),
-                    ("Z (recul +)", "cm"),
+                    ("Lacet", "°"),
+                    ("Tangage", "°"),
+                    ("Roulis", "°"),
+                    ("X", "cm"),
+                    ("Y", "cm"),
+                    ("Z", "cm"),
                 ];
+                let output = self
+                    .processed
+                    .map(|p| p.output.to_array())
+                    .unwrap_or_default();
                 egui::Grid::new("pose")
-                    .num_columns(3)
+                    .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
-                        for ((name, unit), r) in names.iter().zip(&self.jitter) {
+                        ui.strong("Axe");
+                        ui.strong("Sortie");
+                        ui.strong("± brut");
+                        ui.strong("± filtré");
+                        ui.end_row();
+                        for (i, (name, unit)) in names.iter().enumerate() {
                             ui.label(*name);
-                            ui.monospace(format!("{:+7.1} {unit}", r.mean().unwrap_or(0.0)));
-                            ui.monospace(format!("± {:.2}", r.std_dev().unwrap_or(0.0)));
+                            ui.monospace(format!("{:+7.1} {unit}", output[i]));
+                            ui.monospace(format!(
+                                "{:.2}",
+                                self.jitter_raw[i].std_dev().unwrap_or(0.0)
+                            ));
+                            ui.monospace(format!(
+                                "{:.3}",
+                                self.jitter_filtered[i].std_dev().unwrap_or(0.0)
+                            ));
                             ui.end_row();
                         }
                     });
@@ -286,7 +314,7 @@ impl CameraView {
         );
         if fov.changed() {
             self.send(PipelineCommand::SetHfov(self.hfov_deg));
-            self.recentered = false;
+            self.recentered = true; // recentrage automatique après changement de focale
             self.reset_jitter();
         }
     }
@@ -362,9 +390,6 @@ impl CameraView {
             }
         }
 
-        ui.separator();
-        self.head_panel(ui);
-
         if let Some(e) = &self.error {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, e);
@@ -382,12 +407,19 @@ impl CameraView {
         } else {
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
         };
-        let response = ui
-            .centered_and_justified(|ui| ui.add(egui::Image::new(tex).uv(uv).shrink_to_fit()))
-            .inner;
+        // On calcule nous-mêmes le rectangle de l'image (proportions conservées,
+        // centrée) : c'est le *même* rectangle qui sert à dessiner l'image et à
+        // placer les points. Avant, on prenait celui du widget, qui couvre toute la
+        // zone disponible : dès que la fenêtre n'était plus en 16:9, les points
+        // s'étiraient.
+        let available = ui.available_rect_before_wrap();
+        ui.allocate_rect(available, egui::Sense::hover());
+        let rect = fit_aspect(available, self.frame_size.0 / self.frame_size.1);
+        let painter = ui.painter_at(available);
+        painter.image(tex.id(), rect, uv, Color32::WHITE);
 
         if let Some(face) = &self.face {
-            self.draw_face(ui.painter_at(response.rect), response.rect, face);
+            self.draw_face(painter, rect, face);
         }
     }
 
@@ -472,12 +504,63 @@ impl eframe::App for CameraView {
 
     /// Dessin de l'interface.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Les panneaux défilent : leur contenu dépasse la hauteur d'un écran de portable.
         egui::Panel::left("controls")
             .resizable(false)
             .min_size(240.0)
             .show(ui, |ui| {
-                self.side_panel(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui));
+            });
+        egui::Panel::right("tracking")
+            .resizable(false)
+            .min_size(290.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.head_panel(ui);
+                    ui.separator();
+                    let filtered = self.processed.map(|p| p.filtered.to_array());
+                    if self.tuning.ui(ui, filtered) {
+                        let settings = Box::new(self.tuning.settings.clone());
+                        self.send(PipelineCommand::SetSettings(settings));
+                    }
+                });
             });
         egui::CentralPanel::default().show(ui, |ui| self.camera_image(ui));
+    }
+}
+
+/// Plus grand rectangle de proportions `aspect` (largeur / hauteur) centré dans `outer`.
+fn fit_aspect(outer: egui::Rect, aspect: f32) -> egui::Rect {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        16.0 / 9.0
+    };
+    let size = if outer.width() / outer.height() > aspect {
+        egui::vec2(outer.height() * aspect, outer.height()) // fenêtre trop large : bandes à gauche/droite
+    } else {
+        egui::vec2(outer.width(), outer.width() / aspect) // fenêtre trop haute : bandes en haut/bas
+    };
+    egui::Rect::from_center_size(outer.center(), size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_16_9_dans_une_fenetre_haute() {
+        let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 900.0));
+        let r = fit_aspect(outer, 16.0 / 9.0);
+        assert_eq!(r.width(), 800.0);
+        assert_eq!(r.height(), 450.0);
+        assert_eq!(r.center(), outer.center());
+    }
+
+    #[test]
+    fn image_16_9_dans_une_fenetre_large() {
+        let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2000.0, 450.0));
+        let r = fit_aspect(outer, 16.0 / 9.0);
+        assert_eq!((r.width(), r.height()), (800.0, 450.0));
     }
 }

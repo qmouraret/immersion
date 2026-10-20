@@ -2,6 +2,7 @@
 
 mod camera_view;
 mod pipeline;
+mod tuning;
 
 use std::path::PathBuf;
 
