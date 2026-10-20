@@ -286,6 +286,7 @@ Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 | Rugosité de sortie toujours à 0 | la zone morte force 0 au centre | `stats::active_still_roughness` : fenêtres hors zone morte seulement |
 | Mesure de tremblement faussée par les mouvements | la différence seconde est forte au début et à la fin d'un mouvement | `stats::still_roughness` : médiane sur des fenêtres de 0,5 s |
 | La scène tremble même tête immobile | le bruit **brut** de la pose (tangage ≈ 0,7°, Z ≈ 0,35 cm) dépasse les zones mortes. Il vient des points du modèle : changer de calcul de pose (sans second passage, points rigides) ne gagne que 3 à 9 % (`eval_pose`). Z, déduit de la taille apparente du visage, est 10 × plus bruité que X | filtre des translations plus lent (0,17 Hz / β 0,17, retard 100 à 130 ms) ; Z : zone morte 0,4 cm, gain ×1,33. Tremblement de Z en sortie ÷ 3 |
+| La vue saute quand on cligne des yeux, ouvre la bouche ou lève les sourcils | le modèle décale tout le maillage : tangage +1,5° (yeux fermés) à +4,4° (bouche), Z jusqu'à −7 cm (la bouche ouverte agrandit le visage). Ni le choix des points ni le gel de la pose ne règlent le tangage (mesuré avec `eval_pose` sur une session de grimaces) | distance calculée sur `UPPER_POINTS` (Z au repos ÷ 3,9) ; tangage : zone morte 2° et courbe 25° → 60° (÷ 5) ; lacet : zone morte 1°. À venir (phase 5) : correction apprise selon l'expression |
 | `cargo` introuvable depuis un shell d'agent | `~/.cargo/env` non chargé | `source "$HOME/.cargo/env"` |
 
 ---
@@ -298,7 +299,8 @@ cargo run -p vision       --example inspect_models     # entrées / sorties des 
 cargo run -p vision       --example bench_models       # temps de détection / points
 cargo run -p vision       --example profile_landmarks  # profil ORT par opération (JSON dans target/)
 cargo run -p tracker-core --example bench_sample       # coût du recadrage
-cargo run --release -p tracker-core --example analyze_session -- recordings/session-XXX.csv        # bruit et activité par axe
+cargo run --release -p tracker-core --example analyze_session -- recordings/session-XXX.csv        # bruit et activité par axe (pose enregistrée)
+cargo run --release -p tracker-core --example analyze_session -- recordings/session-XXX.lmk        # idem, pose recalculée avec le calcul actuel
 cargo run --release -p tracker-core --example tune_filter -- recordings/session-XXX.csv rot 60     # meilleur filtre (rot|pos) pour ≤ 60 ms
 cargo run --release -p tracker-core --example compare_filters -- recordings/session-XXX.csv rot 0.5:0.05 0.1:0.03:3
 cargo run --release -p tracker-core --example eval_pose -- recordings/session-XXX.lmk              # variantes du calcul de pose

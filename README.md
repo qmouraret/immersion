@@ -313,3 +313,28 @@ des points du modèle, pas du calcul. Le levier est ailleurs : **Z**, déduit de
 est 10 fois plus bruité que X. Les translations ont donc maintenant leur propre filtre, plus lent
 (0,17 Hz / β 0,17), et Z une zone morte de 0,4 cm et un gain de ×1,33. Le tremblement de Z en sortie est
 divisé par 3, pour un retard de 100 à 130 ms sur les translations, contre environ 70 ms sur les rotations.
+
+### Expressions du visage (clignements, bouche, sourcils)
+
+Une session « grimaces », tête immobile, a montré que le **modèle de points décale la pose quand
+l'expression change** :
+
+| Expression | Tangage | Z |
+|---|---|---|
+| Yeux fermés | +1,5° | — |
+| Bouche ouverte | +2 à +4,4° | jusqu'à −7 cm (le visage paraît plus grand) |
+| Sourcils levés | +3,3° | — |
+
+Ce qui a été essayé (outil `eval_pose`, sur les points enregistrés) :
+- **Choisir les points** (9 ensembles) : aucun effet sur le tangage. Pour Z, en revanche, ne garder que le
+  haut du visage divise l'écart par 2.
+- **Figer la pose pendant que l'expression change** : pire, car la pose saute au relâchement.
+- **Corriger selon une mesure de l'expression**, apprise par régression linéaire : Z divisé par 3, tangage
+  par 1,3 seulement. Ce sera l'objet d'une étape de l'étalonnage (phase 5).
+
+Ce qui est en place :
+- **Calcul hybride** : l'orientation est calculée sur les 468 points, la distance sur les 33 points du haut
+  du visage (`UPPER_POINTS`). L'écart de Z en sortie au repos passe de 2,66 à 0,68 cm.
+- **Courbes** : zone morte de 2° pour le tangage et courbe plus douce (25° de tête → 60° de vue), zone morte
+  de 1° pour le lacet. L'écart de sortie au repos passe de 2,93° à 0,58° pour le tangage, et de 0,95° à
+  0,63° pour le lacet.

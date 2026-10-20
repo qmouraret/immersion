@@ -242,6 +242,17 @@ pub const RIGID_POINTS: [usize; 59] = [
     234, 454, 127, 356, 162, 389, 21, 251, 93, 323, // tempes, côtés du visage
 ];
 
+/// Haut du visage : front, arête du nez, coins des yeux, tempes. La bouche et
+/// la mâchoire n'y sont pas : ouvrir la bouche n'agrandit pas ce groupe de
+/// points, d'où une distance (Z) bien moins sensible aux expressions
+/// (écart au repos ÷ 2 sur une session de grimaces).
+pub const UPPER_POINTS: [usize; 33] = [
+    10, 151, 9, 108, 337, 69, 299, 104, 333, 67, 297, 109, 338, // front
+    168, 6, 197, 195, // arête du nez
+    33, 133, 263, 362, 130, 359, // coins des yeux
+    234, 454, 127, 356, 162, 389, 21, 251, 93, 323, // tempes, côtés du visage
+];
+
 /// Points du visage utilisés pour l'alignement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointSet {
@@ -249,8 +260,25 @@ pub enum PointSet {
     All,
     /// [`RIGID_POINTS`] seulement.
     Rigid,
+    /// [`UPPER_POINTS`] seulement.
+    Upper,
     /// Une liste d'indices donnée (expérimentations, `examples/eval_pose`).
     Custom(&'static [usize]),
+}
+
+impl PointSet {
+    fn indices(self) -> Vec<usize> {
+        match self {
+            Self::All => (0..CANONICAL_FACE.len()).collect(),
+            Self::Rigid => RIGID_POINTS.to_vec(),
+            Self::Upper => UPPER_POINTS.to_vec(),
+            Self::Custom(list) => list
+                .iter()
+                .copied()
+                .filter(|&i| i < CANONICAL_FACE.len())
+                .collect(),
+        }
+    }
 }
 
 /// Variantes du calcul de pose (pour les comparer hors ligne, `examples/eval_pose`).
@@ -261,14 +289,22 @@ pub struct EstimateOptions {
     /// Part des points conservés au second passage, choisis à chaque image
     /// (les autres sont considérés comme aberrants). `1.0` : pas de second passage.
     pub inlier_ratio: f64,
+    /// Si donné, la distance (échelle) est calculée par un second alignement sur
+    /// ces points seulement ; l'orientation reste celle de `points`.
+    pub depth_points: Option<PointSet>,
 }
 
 impl Default for EstimateOptions {
-    /// Le calcul utilisé par l'application.
+    /// Le calcul utilisé par l'application : orientation sur les 468 points avec
+    /// second passage, distance sur [`UPPER_POINTS`].
     fn default() -> Self {
         Self {
             points: PointSet::All,
             inlier_ratio: 0.75,
+            // Distance par les points du haut du visage : ouvrir la bouche ne fait
+            // plus croire qu'on s'approche (écart au repos de Z ÷ 2,3 sur une
+            // session de grimaces, orientation inchangée).
+            depth_points: Some(PointSet::Upper),
         }
     }
 }
@@ -287,15 +323,7 @@ pub fn estimate_with(
     if landmarks.points.len() < CANONICAL_FACE.len() {
         return None;
     }
-    let indices: Vec<usize> = match options.points {
-        PointSet::All => (0..CANONICAL_FACE.len()).collect(),
-        PointSet::Rigid => RIGID_POINTS.to_vec(),
-        PointSet::Custom(list) => list
-            .iter()
-            .copied()
-            .filter(|&i| i < CANONICAL_FACE.len())
-            .collect(),
-    };
+    let indices = options.points.indices();
     let n = indices.len();
     let src: Vec<Vector3<f64>> = indices
         .iter()
@@ -340,7 +368,11 @@ pub fn estimate_with(
     // Distance : à la profondeur Z, 1 cm mesure f / Z pixels ⇒ Z = f / échelle.
     let f = camera.focal_px();
     let (cx, cy) = camera.center();
-    let depth = f / fit.scale;
+    let scale = match options.depth_points {
+        Some(set) => depth_scale(landmarks, set).unwrap_or(fit.scale),
+        None => fit.scale,
+    };
+    let depth = f / scale;
     // Position du centre de la tête : on « remonte » le pixel de l'origine du modèle.
     let (u, v) = (fit.translation.x, -fit.translation.y);
     let position = Vector3::new((u - cx) * depth / f, (cy - v) * depth / f, -depth);
@@ -358,6 +390,26 @@ pub fn estimate_with(
         image_fit: fit,
         residual_px,
     })
+}
+
+/// Échelle (px/cm) d'un alignement sur les seuls points `set`.
+fn depth_scale(landmarks: &FaceLandmarks, set: PointSet) -> Option<f64> {
+    let indices = set.indices();
+    let src: Vec<Vector3<f64>> = indices
+        .iter()
+        .map(|&i| {
+            let p = CANONICAL_FACE[i];
+            Vector3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
+        })
+        .collect();
+    let dst: Vec<Vector3<f64>> = indices
+        .iter()
+        .map(|&i| {
+            let p = landmarks.points[i];
+            Vector3::new(f64::from(p[0]), -f64::from(p[1]), -f64::from(p[2]))
+        })
+        .collect();
+    umeyama(&src, &dst, &vec![1.0; indices.len()]).map(|fit| fit.scale)
 }
 
 /// Écart dans le plan image (x, y) entre chaque point mesuré et le modèle ajusté.
@@ -387,7 +439,7 @@ mod tests {
     fn assert_close(a: f64, b: f64, tol: f64, what: &str) {
         assert!(
             (a - b).abs() < tol,
-            "{what} : obtenu {a:.3}, attendu {b:.3}"
+            "{what} : obtenu {a:.6}, attendu {b:.6} (tolérance {tol:e})"
         );
     }
 
@@ -455,7 +507,8 @@ mod tests {
         let lm = synthetic(Angles::default(), Vector3::new(0.0, 0.0, -60.0));
         let pose = estimate(&lm, &CAMERA).unwrap().absolute();
         assert_close(pose.angles.yaw, 0.0, 1e-6, "lacet");
-        assert_close(pose.z, 60.0, 1e-6, "distance");
+        // Points en `f32` (comme ceux du modèle) : ~1e-5 cm d'arrondi sur la distance.
+        assert_close(pose.z, 60.0, 1e-4, "distance");
         assert_close(pose.x, 0.0, 1e-6, "x");
     }
 
@@ -495,14 +548,14 @@ mod tests {
         assert_close(pose.angles.pitch, 6.0, 0.5, "tangage");
     }
 
-    #[test]
-    fn points_rigides_symetriques_et_sans_bouche() {
+    /// Ensemble sans doublon, symétrique (x → −x) et au-dessus de `min_y` (cm).
+    fn check_point_set(points: &[usize], min_y: f32) {
         use std::collections::HashSet;
-        let set: HashSet<usize> = RIGID_POINTS.iter().copied().collect();
-        assert_eq!(set.len(), RIGID_POINTS.len(), "pas de doublon");
-        for &i in &RIGID_POINTS {
+        let set: HashSet<usize> = points.iter().copied().collect();
+        assert_eq!(set.len(), points.len(), "pas de doublon");
+        for &i in points {
             let p = CANONICAL_FACE[i];
-            // Le symétrique (x → −x) est le sommet le plus proche du point miroir.
+            // Le symétrique est le sommet le plus proche du point miroir.
             let mirror = (0..CANONICAL_FACE.len())
                 .min_by(|&a, &b| {
                     let d = |j: usize| {
@@ -516,9 +569,21 @@ mod tests {
                 set.contains(&mirror),
                 "le symétrique de {i} ({mirror}) manque"
             );
-            // La bouche commence vers y = −3,4 cm dans le modèle canonique.
-            assert!(p[1] > -3.0, "le point {i} est trop bas (bouche ?)");
+            assert!(p[1] > min_y, "le point {i} est trop bas (y = {})", p[1]);
         }
+    }
+
+    #[test]
+    fn points_rigides_symetriques_et_sans_bouche() {
+        // La bouche commence vers y = −3,4 cm dans le modèle canonique.
+        check_point_set(&RIGID_POINTS, -3.0);
+    }
+
+    #[test]
+    fn points_du_haut_symetriques_et_loin_de_la_bouche() {
+        // Rien sous les côtés du visage à hauteur des oreilles (points 93 / 323,
+        // y ≈ −1,05 cm), loin au-dessus de la bouche (≈ −3,4 cm).
+        check_point_set(&UPPER_POINTS, -1.2);
     }
 
     #[test]
@@ -533,14 +598,17 @@ mod tests {
             EstimateOptions {
                 points: PointSet::Rigid,
                 inlier_ratio: 1.0,
+                depth_points: None,
             },
             EstimateOptions {
                 points: PointSet::All,
                 inlier_ratio: 1.0,
+                depth_points: None,
             },
             EstimateOptions {
                 points: PointSet::Rigid,
                 inlier_ratio: 0.75,
+                depth_points: None,
             },
         ] {
             let pose = estimate_with(&lm, &CAMERA, &options).unwrap().absolute();
@@ -564,6 +632,7 @@ mod tests {
         let options = EstimateOptions {
             points: PointSet::Rigid,
             inlier_ratio: 1.0,
+            depth_points: None,
         };
         let pose = estimate_with(&lm, &CAMERA, &options).unwrap().absolute();
         assert_close(pose.angles.yaw, -12.0, 1e-3, "lacet");

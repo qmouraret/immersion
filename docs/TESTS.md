@@ -15,23 +15,23 @@ cargo test -p capture -- --ignored  # tests matériels (caméra branchée, permi
 Les tests de `vision` utilisent les vrais modèles. S'ils sont absents, ils affichent un message et
 s'arrêtent sans échouer (lancer `scripts/fetch_models.sh`).
 
-## Ce qui est testé automatiquement (96 tests, dont 2 ignorés)
+## Ce qui est testé automatiquement (98 tests, dont 2 ignorés)
 
 | Crate / module | Tests | Ce qui est vérifié |
 |---|---|---|
-| **tracker-core** | **63** | |
+| **tracker-core** | **65** | |
 | `frame` | 2 | cohérence taille / buffer |
 | `roi` | 7 | aller-retour image ↔ recadrage, letterbox, orientation déduite de deux points, stabilisation (petites variations ignorées, vrais mouvements suivis, angles autour de ±π) |
 | `tensor` | 2 | recadrage identité, noir hors de l'image |
 | `blazeface` | 4 | 896 ancres, décodage d'une détection, seuil, moyenne pondérée des détections voisines |
 | `face` | 2 | sortie du modèle ramenée dans l'image, détection → ROI agrandie et carrée |
 | `canonical_face` | 3 | symétrie des yeux, nez le plus en avant, menton en bas |
-| `pose` | 10 | Umeyama exact, angles aller-retour, signes intuitifs, pose centrée, pose décalée (perspective), robustesse (bouche ouverte), recentrage, points rigides (symétriques, sans bouche), variantes de calcul exactes, points rigides insensibles à la bouche |
+| `pose` | 11 | points du haut du visage (symétriques, loin de la bouche), Umeyama exact, angles aller-retour, signes intuitifs, pose centrée, pose décalée (perspective), robustesse (bouche ouverte), recentrage, points rigides (symétriques, sans bouche), variantes de calcul exactes, points rigides insensibles à la bouche |
 | `landmark_log` | 4 | aller-retour binaire, taille attendue, fichier tronqué et mauvais en-tête détectés |
 | `filter` | 4 | première mesure, réduction du bruit ≥ ×5, retard < 50 ms à 120 °/s, convergence |
 | `curve` | 4 | zone morte, symétrie, plafond, forme expo, continuité |
 | `processing` | 5 | contournement, courbe après filtre, lissage, `reset`, filtres rotation / translation séparés |
-| `stats` | 8 | écart-type, fenêtre glissante, rugosité (rampe = 0), rugosité à l'arrêt (mouvements écartés), rugosité hors zone morte, retard entier et fractionnaire retrouvé, pas de retard sans mouvement |
+| `stats` | 9 | sauts rares vus par le quantile, écart-type, fenêtre glissante, rugosité (rampe = 0), rugosité à l'arrêt (mouvements écartés), rugosité hors zone morte, retard entier et fractionnaire retrouvé, pas de retard sans mouvement |
 | `autotune` | 5 | tri sans panique sur des valeurs proches (ordre total), grille logarithmique, contrainte de retard respectée, meilleur réglage nettement moins rugueux qu'un filtre inactif, plus de retard toléré → moins de tremblement |
 | `recording` | 3 | aller-retour CSV, erreur avec numéro de ligne, rejeu identité |
 | **capture** | **4 (+2 ignorés)** | |
@@ -86,6 +86,7 @@ Lancer `cargo run --bin immersion` **depuis un terminal ayant la permission cam�
 - [ ] Au démarrage, les sorties partent de 0 (recentrage automatique).
 - [ ] Immobile : sorties stables (zone morte) ; « ± filtré » < « ± brut ».
 - [ ] **Tête tenue à 20° sur le côté : la Mire et la Scène 3D ne tremblent pas** avec les réglages par défaut.
+- [ ] Tête immobile au centre : cligner des yeux, ouvrir la bouche, lever les sourcils. La vue bouge peu, nettement moins qu'avant le calcul hybride et la zone morte du tangage.
 - [ ] `IMMERSION_ROI_STABILIZE=0 cargo run --bin immersion` : le tremblement est plus fort qu'avec la stabilisation.
 - [ ] Rotation vive puis retour : la sortie suit sans retard gênant et revient à 0 sans dépasser.
 - [ ] Les curseurs agissent immédiatement ; « Valeurs par défaut » restaure les réglages.

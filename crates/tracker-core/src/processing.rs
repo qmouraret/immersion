@@ -53,11 +53,11 @@ impl Default for TrackingSettings {
             },
             curves_enabled: true,
             curves: [
-                rot(0.5, 40.0, 180.0, 1.6), // lacet : 40° de tête → regarder derrière soi
-                rot(0.5, 25.0, 90.0, 1.4),  // tangage
-                rot(0.5, 30.0, 30.0, 1.0),  // roulis : 1:1, l'amplifier donne le mal de mer
-                rot(0.2, 15.0, 30.0, 1.0),  // x (cm)
-                rot(0.2, 15.0, 20.0, 1.0),  // y (cm)
+                rot(1.0, 40.0, 180.0, 1.6), // lacet : 40° de tête → regarder derrière soi ; zone morte 1° (clignements, bouche)
+                rot(2.0, 25.0, 60.0, 1.4), // tangage : les expressions le décalent de 1,5 à 4° (yeux, bouche, sourcils) → zone morte 2°, courbe plus douce (écart au repos ÷ 5)
+                rot(0.5, 30.0, 30.0, 1.0), // roulis : 1:1, l'amplifier donne le mal de mer
+                rot(0.2, 15.0, 30.0, 1.0), // x (cm)
+                rot(0.2, 15.0, 20.0, 1.0), // y (cm)
                 rot(0.4, 15.0, 20.0, 1.0), // z (cm) : zone morte ≈ 2,5 × le bruit brut, gain modéré
             ],
         }

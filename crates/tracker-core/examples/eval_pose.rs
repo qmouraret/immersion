@@ -40,10 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let custom = |list| EstimateOptions {
         points: PointSet::Custom(list),
         inlier_ratio: 1.0,
+        depth_points: None,
     };
     let variants = [
         (
-            "actuel : 468 pts, 2e passage 75 %",
+            "actuel (hybride : distance par le haut)",
             EstimateOptions::default(),
         ),
         (
@@ -51,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EstimateOptions {
                 points: PointSet::All,
                 inlier_ratio: 1.0,
+                depth_points: None,
             },
         ),
         (
@@ -58,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EstimateOptions {
                 points: PointSet::Rigid,
                 inlier_ratio: 1.0,
+                depth_points: None,
             },
         ),
         (
@@ -65,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EstimateOptions {
                 points: PointSet::Rigid,
                 inlier_ratio: 0.9,
+                depth_points: None,
             },
         ),
         (
@@ -72,6 +76,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EstimateOptions {
                 points: PointSet::Rigid,
                 inlier_ratio: 0.75,
+                depth_points: None,
+            },
+        ),
+        (
+            "avant : 468 pts, distance par les 468",
+            EstimateOptions {
+                depth_points: None,
+                ..EstimateOptions::default()
             },
         ),
         ("rigides sans front", custom(no_forehead)),
