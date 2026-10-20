@@ -1,0 +1,8 @@
+[package]
+name = "tracker-core"
+description = "Pipeline de tracking pur : types de base, maths de pose, filtres. Aucune E/S."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

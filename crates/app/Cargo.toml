@@ -1,0 +1,18 @@
+[package]
+name = "app"
+description = "Application Immersion : interface egui, banc de test, configuration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "immersion"
+path = "src/main.rs"
+
+[dependencies]
+tracker-core.workspace = true
+capture.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe = "0.37.0"

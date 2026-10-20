@@ -1,0 +1,12 @@
+[package]
+name = "capture"
+description = "Abstraction de la webcam : énumération, capture sur un thread dédié."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracker-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }

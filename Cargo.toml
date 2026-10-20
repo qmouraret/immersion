@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+tracker-core = { path = "crates/tracker-core" }
+capture = { path = "crates/capture" }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# En mode debug, on optimise quand même les dépendances (décodage vidéo,
+# inférence ML, rendu) : sinon elles sont 10 à 50× plus lentes. Notre propre
+# code reste en opt-level 0 pour garder une compilation rapide et un bon débogage.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Attention : le code générique (`decode_image::<RgbFormat>()`, itérateurs…)
+# est compilé dans la crate qui l'*appelle* (monomorphisation), avec les
+# réglages de cette crate. Les crates qui manipulent des pixels doivent donc
+# être optimisées elles aussi, sinon le décodage vidéo reste 60× plus lent.
+[profile.dev.package.capture]
+opt-level = 3
+
+[profile.dev.package.tracker-core]
+opt-level = 3
