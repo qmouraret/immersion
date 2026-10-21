@@ -17,7 +17,7 @@ nouvelle session. À lire **après** [AGENTS.md](../AGENTS.md), qui donne les r�
 | 3 | Filtre One-Euro, courbes, recentrage | ✅ validée |
 | 4 | Banc de test, réglage automatique, analyse des sessions | ✅ validée |
 | 5 | Étalonnage (FOV, posture neutre, amplitudes, expressions), profils | ✅ validée |
-| 6 | Sortie UDP OpenTrack, compilation Windows, GitHub | 🧪 committée, **CI Windows au vert**, test manuel à faire |
+| 6 | Sortie UDP OpenTrack, compilation Windows, GitHub | ✅ validée sur le PC Windows |
 | 7 | Intégration MSFS 2024 (7a via OpenTrack, 7b émulation TrackIR native) | à faire, **demande le PC** |
 | 8 | Suivi du regard (iris), épaules | à faire, faisable sur Mac |
 
@@ -25,19 +25,24 @@ Dépôt : <https://github.com/qmouraret/immersion> (public, licence MIT).
 Le workflow `.github/workflows/windows.yml` compile, teste (128 tests, plus 2 tests matériels ignorés)
 et produit l'exécutable `immersion-windows-x64` à chaque push sur `main`.
 
-## 2. Ce qui reste à valider
+## 2. Validé sur le PC Windows (21 octobre 2026)
 
-1. **Phase 6, sur le Mac ou le PC** : lancer le récepteur de diagnostic puis l'application, et cocher
-   « Envoyer la pose » dans le panneau Sortie :
-   ```bash
-   cargo run -p output --example receive
-   cargo run --bin immersion
-   ```
-   Attendu : environ 30 paquets/s, valeurs identiques à la colonne « Sortie » ; le débit tombe à 0 quand le
-   visage est masqué ; une adresse invalide affiche une erreur sans figer la vidéo.
-   → Une fois validé, marquer la phase 6 ✅ dans `AGENTS.md`.
-2. **Sur le PC** : `immersion.exe` démarre, la webcam est vue, et les tests passent en local
-   (`cargo test --workspace`).
+- `cargo test --workspace` : 128 tests verts (2 tests matériels ignorés), modèles chargés.
+- L'application démarre et voit la webcam. Décodage 0,7 ms, points 3,7 ms (Ryzen 7 9700X).
+- Phase 6 : les paquets arrivent au récepteur ; le débit tombe à 0 quand le visage est masqué ; une
+  adresse invalide affiche une erreur sans figer la vidéo.
+
+Constats à garder en tête :
+- **Webcam actuelle limitée** : au mieux 640×480 à 30 img/s (960×720 à 15), et en pratique **9 img/s**
+  (exposition automatique de la caméra, probablement, par manque de lumière). Le calcul n'est pas en cause. À remplacer
+  par une webcam 720p/1080p à 30 img/s ou plus.
+- **nokhwa (backend Windows)** affiche « @ 1 fps » pour le format en cours : il ne garde que le
+  dénominateur de la fréquence. Il jette aussi les formats à fréquence fractionnaire (29,97 img/s).
+  Sans effet sur cette webcam, mais à surveiller avec la prochaine.
+- **Masquer le visage en partie** (main devant) envoie quelques poses fantaisistes avant la perte du
+  visage : tangage +43°, Z en butée. À corriger avant de jouer (seuil de confiance, rejet des sauts).
+- **Smart App Control** bloque `cargo build --release` (script de build de `mozjpeg-sys`) ; le debug
+  passe. **Norton SafeCam** bloquait la caméra jusqu'à ce que `immersion.exe` soit autorisé.
 
 ## 3. Prochaines étapes possibles
 
@@ -95,7 +100,7 @@ pièges d'`AGENTS.md` § 7. L'essentiel :
    cargo test --workspace
    cargo run --release --bin immersion
    ```
-3. Valider la phase 6 (§ 2), puis attaquer la phase 7a (§ 3).
+3. Attaquer la phase 7a (§ 3). OpenTrack 2026.1.0 est à installer ; MSFS 2024 est installé (Steam).
 
 ## 7. Façon de travailler (rappel)
 

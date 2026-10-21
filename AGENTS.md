@@ -23,7 +23,7 @@ phase du README liste les concepts Rust qu'elle introduit.
 
 | | |
 |---|---|
-| Développement | macOS (Apple Silicon), sans PC Windows pour l'instant |
+| Développement | macOS (Apple Silicon), puis PC Windows 11 (depuis octobre 2026) |
 | Cible finale | Windows 10/11 x64 (MSFS 2024) |
 | Langage | Rust, édition 2024 (toolchain stable, 1.99 au moment de l'écriture) |
 | Langue | **Commentaires, documentation, interface et messages de commit en français** ; identifiants en anglais |
@@ -38,7 +38,7 @@ phase du README liste les concepts Rust qu'elle introduit.
 | 3 | Lissage One-Euro, courbes, recentrage | ✅ |
 | 4 | Banc de test (mire, scène 3D, courbes, enregistrements), réglage automatique | ✅ |
 | 5 | Assistant d'étalonnage (FOV, posture neutre, amplitudes, expressions), profils par webcam | ✅ |
-| 6 | Sortie UDP OpenTrack, compilation Windows vérifiée | 🧪 écrit, en attente de validation |
+| 6 | Sortie UDP OpenTrack, compilation Windows vérifiée | ✅ |
 | 7 | Intégration MSFS 2024, puis émulation TrackIR native | à faire |
 | 8 | Suivi du regard (iris), épaules | à faire |
 
