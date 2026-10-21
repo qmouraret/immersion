@@ -16,6 +16,7 @@ use vision::{FaceResult, TrackMode};
 
 use crate::bench::{Bench, Sample, Tab};
 use crate::calibration::{CalibAction, CalibSample, Calibration};
+use crate::output_panel::OutputPanel;
 use crate::pipeline::{FrameOutput, Pipeline, PipelineCommand, PipelineEvent};
 use crate::profile::{self, Profile};
 use crate::tuning::Tuning;
@@ -95,6 +96,7 @@ pub struct CameraView {
     expression_model: Option<tracker_core::expression::ExpressionModel>,
     /// Fichier du profil de la webcam courante (chargé ou enregistré).
     profile_path: Option<String>,
+    output: OutputPanel,
     /// Fenêtres glissantes d'une seconde par axe, avant et après le filtre.
     jitter_raw: [Rolling; 6],
     jitter_filtered: [Rolling; 6],
@@ -127,6 +129,7 @@ impl CameraView {
             calibration: Calibration::default(),
             expression_model: None,
             profile_path: None,
+            output: OutputPanel::new(output::OutputSettings::default()),
             jitter_raw: std::array::from_fn(|_| Rolling::new(30)),
             jitter_filtered: std::array::from_fn(|_| Rolling::new(30)),
             format: None,
@@ -164,6 +167,7 @@ impl CameraView {
             self.models_dir.clone(),
             self.hfov_deg,
             self.tuning.settings.clone(),
+            self.output.settings.clone(),
         ));
         if let Some(model) = &self.expression_model {
             self.send(PipelineCommand::SetExpressionModel(Some(Box::new(
@@ -211,6 +215,7 @@ impl CameraView {
                             landmarks: lm.clone(),
                         });
                     }
+                    self.output.on_frame(t, output.sink.clone());
                     self.calibration.push(&CalibSample {
                         t,
                         depth_scale: output.head.map(|h| h.depth_scale),
@@ -251,6 +256,7 @@ impl CameraView {
                 pose,
                 processed,
                 expression: _,
+                sink: _,
             } = *output;
             let upload_start = Instant::now();
             let size = [frame.width as usize, frame.height as usize];
@@ -309,6 +315,7 @@ impl CameraView {
                 self.hfov_deg = p.hfov_deg;
                 self.tuning.settings = p.settings;
                 self.expression_model = p.expression;
+                self.output.set(p.output);
                 self.profile_path = Some(profile::path_for(&dir, &camera).display().to_string());
                 tracing::info!("profil chargé pour « {camera} »");
             }
@@ -316,6 +323,7 @@ impl CameraView {
                 self.hfov_deg = DEFAULT_HFOV_DEG;
                 self.tuning.settings = TrackingSettings::default();
                 self.expression_model = None;
+                self.output.set(output::OutputSettings::default());
                 self.profile_path = None;
             }
             // Profil illisible : on le signale et on garde les valeurs par défaut.
@@ -329,6 +337,7 @@ impl CameraView {
             hfov_deg: self.hfov_deg,
             settings: self.tuning.settings.clone(),
             expression: self.expression_model.clone(),
+            output: self.output.settings.clone(),
         };
         let Some(dir) = profile::profiles_dir() else {
             self.error = Some("dossier de configuration introuvable".into());
@@ -660,6 +669,10 @@ impl eframe::App for CameraView {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.head_panel(ui);
+                    ui.separator();
+                    if let Some(settings) = self.output.ui(ui) {
+                        self.send(PipelineCommand::SetOutput(settings));
+                    }
                     ui.separator();
                     let filtered = self.processed.map(|p| p.filtered.to_array());
                     if self.tuning.ui(ui, filtered) {

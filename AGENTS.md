@@ -36,7 +36,7 @@ phase du README liste les concepts Rust qu'elle introduit.
 | 3 | Lissage One-Euro, courbes, recentrage | ✅ |
 | 4 | Banc de test (mire, scène 3D, courbes, enregistrements), réglage automatique | ✅ |
 | 5 | Assistant d'étalonnage (FOV, posture neutre, amplitudes, expressions), profils par webcam | ✅ |
-| 6 | Sortie UDP OpenTrack, build Windows | à faire |
+| 6 | Sortie UDP OpenTrack, compilation Windows vérifiée | 🧪 écrit, en attente de validation |
 | 7 | Intégration MSFS 2024, puis émulation TrackIR native | à faire |
 | 8 | Suivi du regard (iris), épaules | à faire |
 
@@ -78,21 +78,24 @@ cargo doc --no-deps --open           # documentation de référence des crates
 immersion/
 ├── AGENTS.md  README.md  PROMPT.md
 ├── docs/                    DEPENDENCIES.md, TESTS.md
-├── scripts/fetch_models.sh  téléchargement des modèles (non versionnés)
+├── scripts/                 fetch_models.sh (macOS) / fetch_models.ps1 (Windows) : modèles non versionnés
+├── .github/workflows/       windows.yml : compilation, tests et .exe sous Windows à chaque push
 ├── models/                  *.onnx (ignorés par git) + NOTICE.txt
 ├── recordings/              sessions enregistrées par le banc de test (ignoré par git)
 └── crates/
     ├── tracker-core/        LOGIQUE PURE : géométrie, pose, filtres, courbes, stats, CSV
     ├── capture/             webcam (nokhwa) sur un thread dédié
     ├── vision/              inférence ONNX (ort) : détection + points du visage
-    └── app/                 binaire `immersion` : egui, pipeline, banc de test
+    ├── output/              envoi de la pose (UDP OpenTrack) : seule crate qui fait du réseau
+    └── app/                 binaire `immersion` : egui, pipeline, banc de test, étalonnage
 ```
 
 ### Responsabilités et dépendances entre crates
 
 ```
 app ──▶ vision ──▶ tracker-core
- │  └─▶ capture ──▶ tracker-core
+ │  ├─▶ capture ──▶ tracker-core
+ │  └─▶ output ───▶ tracker-core
  └────────────────▶ tracker-core
 ```
 
@@ -101,6 +104,7 @@ app ──▶ vision ──▶ tracker-core
 | `tracker-core` | `Frame`, `Roi` (et sa stabilisation), recadrage → tenseur, décodage BlazeFace, `FaceLandmarks`, visage canonique, pose (Umeyama), One-Euro, courbes, `PoseProcessor`, stats (rugosité, retard), enregistrement CSV, réglage automatique (`autotune`), données synthétiques de test | — (aucune E/S) |
 | `capture` | énumération des caméras, choix du format, thread de capture | `nokhwa` |
 | `vision` | `FaceTracker` : enchaînement détection / suivi | `ort` |
+| `output` | trait `PoseSink`, `OpenTrackUdp`, `OutputSettings` ; conversion vers les conventions de chaque destination | `std::net` (réseau) |
 | `app` | fenêtre, thread pipeline, réglages, banc de test | `eframe`, `egui`, `egui_plot` |
 
 Modules principaux de `app` :
@@ -112,7 +116,8 @@ Modules principaux de `app` :
 | `camera_view.rs` | application egui : panneaux, vidéo, superposition des points, onglets |
 | `tuning.rs` | panneau des réglages (filtre, courbes) |
 | `calibration.rs` | assistant d'étalonnage : collecte les mesures, renvoie des `CalibAction` |
-| `profile.rs` | profils TOML par webcam (FOV, réglages, correction des expressions) |
+| `profile.rs` | profils TOML par webcam (FOV, réglages, correction des expressions, sortie) |
+| `output_panel.rs` | panneau « Sortie » : adresse, port, inversion d'axes, débit |
 | `bench/` | banc de test : `target` (mire), `scene` (3D), `plots` (courbes), `recordings` |
 
 ---
@@ -142,8 +147,13 @@ Modules principaux de `app` :
   expressions) appartient au thread pipeline. Un recentrage, **moyenné sur 15 images**, a lieu au
   démarrage et après chaque changement de FOV. Au démarrage, la première image sert de neutre
   provisoire, pour que la sortie parte de 0 tout de suite.
-- **Profils** : au choix d'une webcam, son profil (`profile.rs`) est chargé : FOV, réglages et
-  correction des expressions. L'assistant d'étalonnage l'enregistre.
+- **Profils** : au choix d'une webcam, son profil (`profile.rs`) est chargé : FOV, réglages,
+  correction des expressions et sortie. L'assistant d'étalonnage l'enregistre.
+- **Sortie** : le pipeline envoie `processed.output` à chaque image où un visage est trouvé
+  (`PoseSink`, UDP non bloquant). La connexion, qui peut passer par le DNS, se fait sur un thread
+  éphémère.
+- **Modèles** : `IMMERSION_MODELS`, sinon `models/` dans le dossier courant, sinon `models/` à côté de
+  l'exécutable.
 
 ### Budget de performance (MacBook Pro M1 Pro, 1080p)
 
@@ -185,8 +195,10 @@ Objectif : **≥ 30 img/s** et **< 50 ms** de latence de bout en bout.
 Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 (`Pose6::to_array`, `processing::AXES`).
 
-> Les conventions de sortie vers OpenTrack ou MSFS (phase 6) seront converties **à la frontière**,
-> dans la crate de sortie. On ne change jamais les conventions internes.
+> Les conventions de chaque destination sont converties **à la frontière**, dans la crate `output`.
+> OpenTrack (`output/src/opentrack.rs`) : 6 `f64` petit-boutistes `[TX, TY, TZ, lacet, tangage, roulis]`,
+> en cm et en degrés, port 4242, aucun NaN. Les signes sont envoyés tels quels, avec une inversion par
+> axe configurable. On ne change jamais les conventions internes.
 
 ### Indices de points utiles
 
@@ -272,6 +284,11 @@ Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 
 26. **Un commit par phase validée** (plus les correctifs). Message en français : un titre
     `Phase N : …`, puis une liste des changements.
+27. **Auteur des commits : `Quentin Mouraret <qmouraret@gmail.com>`** (configuration locale du dépôt),
+    jamais l'email professionnel : le dépôt est public sur GitHub.
+28. **Le workflow `.github/workflows/windows.yml` doit rester vert** : mise en forme, clippy
+    `-D warnings`, tests et compilation release sous Windows. C'est la seule vérification qui se fait
+    réellement sous Windows tant que l'utilisateur n'a pas de PC.
 
 ---
 
@@ -293,6 +310,8 @@ Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 | Mesure de tremblement faussée par les mouvements | la différence seconde est forte au début et à la fin d'un mouvement | `stats::still_roughness` : médiane sur des fenêtres de 0,5 s |
 | La scène tremble même tête immobile | le bruit **brut** de la pose (tangage ≈ 0,7°, Z ≈ 0,35 cm) dépasse les zones mortes. Il vient des points du modèle : changer de calcul de pose (sans second passage, points rigides) ne gagne que 3 à 9 % (`eval_pose`). Z, déduit de la taille apparente du visage, est 10 × plus bruité que X | filtre des translations plus lent (0,17 Hz / β 0,17, retard 100 à 130 ms) ; Z : zone morte 0,4 cm, gain ×1,33. Tremblement de Z en sortie ÷ 3 |
 | La vue saute quand on cligne des yeux, ouvre la bouche ou lève les sourcils | le modèle décale tout le maillage : tangage +1,5° (yeux fermés) à +4,4° (bouche), Z jusqu'à −7 cm (la bouche ouverte agrandit le visage). Ni le choix des points ni le gel de la pose ne règlent le tangage (mesuré avec `eval_pose` sur une session de grimaces) | distance calculée sur `UPPER_POINTS` (Z au repos ÷ 3,9) ; tangage : zone morte 2° et courbe 25° → 60° (÷ 5) ; lacet : zone morte 1°. À venir (phase 5) : correction apprise selon l'expression |
+| La sortie fige le suivi quelques secondes | un nom d'hôte invalide passe par le DNS (≈ 5 s avant l'échec) | connexion sur un thread éphémère (`PipelineCommand::SetOutput`) ; préférer une adresse IP |
+| `cargo check --target x86_64-pc-windows-msvc` échoue sur `mozjpeg-sys` depuis macOS | bibliothèque C (MJPEG de nokhwa), qui demande le compilateur MSVC | sur Windows, installer les Build Tools C++ de Visual Studio. Pour vérifier le reste depuis le Mac : `default-features = false` sur nokhwa, temporairement |
 | `cargo` introuvable depuis un shell d'agent | `~/.cargo/env` non chargé | `source "$HOME/.cargo/env"` |
 
 ---
@@ -312,6 +331,8 @@ cargo run --release -p tracker-core --example compare_filters -- recordings/sess
 cargo run --release -p tracker-core --example eval_pose -- recordings/session-XXX.lmk              # variantes du calcul de pose
 cargo run --release -p tracker-core --example eval_expression -- recordings/session-XXX.lmk        # correction des expressions (session de grimaces)
 cargo test -p capture -- --ignored                     # tests matériels (caméra)
+cargo run -p output --example receive -- 4242           # récepteur de diagnostic (paquets OpenTrack)
+cargo check --target x86_64-pc-windows-msvc --all-targets   # voir § 7 (mozjpeg-sys)
 ```
 
 Le **banc de test** intégré (onglets Mire, Scène 3D, Courbes, Enregistrements) sert à régler le

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use output::OutputSettings;
 use serde::{Deserialize, Serialize};
 use tracker_core::expression::ExpressionModel;
 use tracker_core::processing::TrackingSettings;
@@ -28,6 +29,8 @@ pub struct Profile {
     pub settings: TrackingSettings,
     /// Correction des expressions, si elle a été apprise.
     pub expression: Option<ExpressionModel>,
+    /// Envoi vers le simulateur.
+    pub output: OutputSettings,
 }
 
 impl Default for Profile {
@@ -37,6 +40,7 @@ impl Default for Profile {
             hfov_deg: 66.0,
             settings: TrackingSettings::default(),
             expression: None,
+            output: OutputSettings::default(),
         }
     }
 }

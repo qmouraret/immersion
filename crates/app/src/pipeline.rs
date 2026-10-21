@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use capture::{CaptureEvent, CaptureHandle, FormatTarget};
+use output::{OutputSettings, PoseSink};
 use tracker_core::expression::{self, ExpressionModel, NUM_FEATURES};
 use tracker_core::processing::{PoseProcessor, Processed, TrackingSettings};
 use tracker_core::{CameraModel, Frame, HeadPose, Pose6, pose};
@@ -31,6 +32,21 @@ pub struct FrameOutput {
     pub processed: Option<Processed>,
     /// Mesure de l'expression du visage (pour l'étalonnage).
     pub expression: Option<[f64; NUM_FEATURES]>,
+    /// État de l'envoi vers le simulateur pour cette image.
+    pub sink: SinkStatus,
+}
+
+/// État de la sortie (envoi vers OpenTrack), pour l'affichage.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SinkStatus {
+    /// Destination active (ex. « OpenTrack UDP → 127.0.0.1:4242 »).
+    pub target: Option<String>,
+    /// Un paquet a été envoyé pour cette image.
+    pub sent: bool,
+    /// Dernière erreur (connexion ou envoi).
+    pub error: Option<String>,
+    /// Connexion en cours (résolution de l'adresse).
+    pub connecting: bool,
 }
 
 /// Nombre d'images moyennées pour un recentrage (≈ 0,5 s).
@@ -61,6 +77,8 @@ pub enum PipelineCommand {
     SetSettings(Box<TrackingSettings>),
     /// Correction des expressions apprise à l'étalonnage (`None` : désactivée).
     SetExpressionModel(Option<Box<ExpressionModel>>),
+    /// Nouvelle configuration de la sortie (reconnexion si nécessaire).
+    SetOutput(OutputSettings),
 }
 
 pub struct Pipeline {
@@ -76,6 +94,7 @@ impl Pipeline {
         models_dir: PathBuf,
         hfov_deg: f32,
         settings: TrackingSettings,
+        output: OutputSettings,
     ) -> Self {
         let (tx, events) = mpsc::sync_channel(2);
         // Canal non borné pour les commandes : il y en a peu, et l'UI ne doit
@@ -86,7 +105,7 @@ impl Pipeline {
         let thread = thread::Builder::new()
             .name("pipeline".into())
             .spawn(move || {
-                let state = State {
+                let mut state = State {
                     hfov_deg,
                     neutral: None,
                     // Recentrage automatique sur la première pose : une pose absolue
@@ -96,7 +115,11 @@ impl Pipeline {
                     settings,
                     processor: PoseProcessor::default(),
                     last_pose_at: None,
+                    sink: None,
+                    connecting: None,
+                    sink_status: SinkStatus::default(),
                 };
+                state.apply(PipelineCommand::SetOutput(output));
                 run(camera, models_dir, state, &tx, &rx_commands, &stop_thread);
             })
             .expect("impossible de créer le thread pipeline");
@@ -138,6 +161,12 @@ struct State {
     /// Instant de capture de la dernière image avec une pose (pour le `dt` du filtre).
     last_pose_at: Option<Instant>,
     expression: Option<ExpressionModel>,
+    /// Destination de la pose, une fois connectée.
+    sink: Option<Box<dyn PoseSink>>,
+    /// Connexion en cours sur un thread à part (une résolution DNS peut prendre
+    /// plusieurs secondes : le suivi ne doit pas s'arrêter pendant ce temps).
+    connecting: Option<Receiver<Result<Box<dyn PoseSink>, String>>>,
+    sink_status: SinkStatus,
 }
 
 /// Résultats de [`State::pose`] pour une image.
@@ -167,7 +196,48 @@ impl State {
             }
             PipelineCommand::SetSettings(settings) => self.settings = *settings,
             PipelineCommand::SetExpressionModel(model) => self.expression = model.map(|m| *m),
+            PipelineCommand::SetOutput(settings) => {
+                self.sink = None;
+                self.sink_status = SinkStatus::default();
+                self.connecting = settings.enabled.then(|| {
+                    let (tx, rx) = mpsc::channel();
+                    // Thread éphémère : il se termine dès la connexion faite.
+                    thread::spawn(move || {
+                        let _ = tx.send(settings.connect().map_err(|e| e.to_string()));
+                    });
+                    self.sink_status.connecting = true;
+                    rx
+                });
+            }
         }
+    }
+
+    /// Envoie la pose de sortie, après avoir récupéré une connexion terminée.
+    fn send_output(&mut self, processed: Option<&Processed>) -> SinkStatus {
+        if let Some(rx) = &self.connecting
+            && let Ok(result) = rx.try_recv()
+        {
+            self.connecting = None;
+            self.sink_status.connecting = false;
+            match result {
+                Ok(sink) => {
+                    self.sink_status.target = Some(sink.describe());
+                    self.sink = Some(sink);
+                }
+                Err(e) => self.sink_status.error = Some(e),
+            }
+        }
+        let mut status = self.sink_status.clone();
+        if let (Some(sink), Some(p)) = (&mut self.sink, processed) {
+            match sink.send(&p.output) {
+                Ok(()) => status.sent = true,
+                Err(e) => {
+                    self.sink_status.error = Some(e.to_string());
+                    status.error = self.sink_status.error.clone();
+                }
+            }
+        }
+        status
     }
 
     /// Accumule les poses d'un recentrage en cours ; à la dernière, la moyenne
@@ -298,12 +368,14 @@ fn run(
             }
             None => None,
         };
+        let pose_output = state.pose(&frame, face.as_ref());
+        let sink = state.send_output(pose_output.processed.as_ref());
         let PoseOutput {
             head,
             pose,
             processed,
             expression,
-        } = state.pose(&frame, face.as_ref());
+        } = pose_output;
 
         match tx.try_send(PipelineEvent::Frame(Box::new(FrameOutput {
             frame,
@@ -313,6 +385,7 @@ fn run(
             pose,
             processed,
             expression,
+            sink,
         }))) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Disconnected(_)) => return,
@@ -342,6 +415,9 @@ mod tests {
             processor: PoseProcessor::default(),
             last_pose_at: None,
             expression: None,
+            sink: None,
+            connecting: None,
+            sink_status: SinkStatus::default(),
         }
     }
 
@@ -429,6 +505,53 @@ mod tests {
         let (pose, _) = observe(&mut s, 0.0, t0 + Duration::from_millis(33));
         // Expression « bouche ouverte de 0,01 » par rapport au neutre → −1° de correction.
         assert!((pose.unwrap().angles.yaw + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn la_pose_de_sortie_part_vers_opentrack() {
+        use std::net::UdpSocket;
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let port = receiver.local_addr().unwrap().port();
+
+        let mut s = state();
+        s.apply(PipelineCommand::SetOutput(OutputSettings {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port,
+            invert: [false; 6],
+        }));
+        // La connexion se fait sur un autre thread : on attend qu'elle aboutisse.
+        let t0 = Instant::now();
+        let mut status = SinkStatus::default();
+        for i in 0u32..200 {
+            let (_, processed) = observe(
+                &mut s,
+                5.0 * f64::from(i % 2),
+                t0 + Duration::from_millis(33 * u64::from(i)),
+            );
+            status = s.send_output(processed.as_ref());
+            if status.sent {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(status.sent, "aucun envoi : {status:?}");
+        assert!(status.target.unwrap().contains(&port.to_string()));
+        let mut buf = [0u8; 64];
+        let (n, _) = receiver.recv_from(&mut buf).unwrap();
+        assert!(output::decode(&buf[..n]).is_some());
+    }
+
+    #[test]
+    fn sortie_desactivee_rien_n_est_envoye() {
+        let mut s = state();
+        s.apply(PipelineCommand::SetOutput(OutputSettings::default()));
+        let (_, processed) = observe(&mut s, 0.0, Instant::now());
+        let status = s.send_output(processed.as_ref());
+        assert!(!status.sent && status.target.is_none() && !status.connecting);
     }
 
     #[test]

@@ -15,7 +15,7 @@ cargo test -p capture -- --ignored  # tests matériels (caméra branchée, permi
 Les tests de `vision` utilisent les vrais modèles. S'ils sont absents, ils affichent un message et
 s'arrêtent sans échouer (lancer `scripts/fetch_models.sh`).
 
-## Ce qui est testé automatiquement (120 tests, dont 2 ignorés)
+## Ce qui est testé automatiquement (130 tests, dont 2 ignorés)
 
 | Crate / module | Tests | Ce qui est vérifié |
 |---|---|---|
@@ -39,10 +39,12 @@ s'arrêtent sans échouer (lancer `scripts/fetch_models.sh`).
 | **capture** | **4 (+2 ignorés)** | |
 | `format` | 4 | 720p préféré au 1080p, fluidité prioritaire, MJPEG évité, formats non décodables ignorés |
 | `lib` | 2 ignorés | caméra inexistante → erreur et arrêt propre ; 10 images reçues de la caméra 0 |
+| **output** | **7** | ordre OpenTrack (translations puis rotations), aller-retour, inversion par axe, jamais de NaN, paquet trop court, **envoi UDP réel en local**, adresse invalide (sans DNS) |
 | **vision** (`tests/models.rs`) | **4** | erreur claire si un modèle manque ; pas de visage ni de ROI sur une image unie ; présence < 0,5 sans visage ; détecteur relancé tant que rien n'est trouvé |
-| **app** | **34** | |
-| `pipeline` | 8 | recentrage automatique, recentrage moyenné sur 15 images, mode absolu, recentrage après changement de FOV, réglages appliqués, correction des expressions appliquée, pas de pose sans visage, dt réel du filtre |
+| **app** | **37** | |
+| `pipeline` | 10 | **pose envoyée à un récepteur UDP local**, rien envoyé quand la sortie est désactivée, recentrage automatique, recentrage moyenné sur 15 images, mode absolu, recentrage après changement de FOV, réglages appliqués, correction des expressions appliquée, pas de pose sans visage, dt réel du filtre |
 | `calibration` | 4 | FOV mesuré en 2 s, amplitudes → entrées des courbes, rien sans visage, rapport d'expressions (non appliqué sans validation) |
+| `output_panel` | 1 | débit sur la dernière seconde |
 | `profile` | 5 | nom de fichier sûr, aller-retour TOML, profil absent, champs manquants complétés par défaut, fichier invalide → erreur claire |
 | `bench::scene` | 7 | signes de la caméra virtuelle (lacet, tangage, roulis, translation), rien derrière la tête, découpe au plan proche |
 | `bench::target` | 4 | validation après le maintien, chrono remis à zéro en sortant, arrêt, cibles dans la mire |
@@ -111,3 +113,11 @@ Lancer `cargo run --bin immersion` **depuis un terminal ayant la permission cam�
 - [ ] **Profil** : « Enregistrer », puis relancer l'application : FOV, courbes et correction sont repris (message « profil chargé » dans le terminal).
 - [ ] Barre d'espace ignorée pendant une mesure.
 - [ ] **Webcam déportée** (dès qu'elle est disponible) : posée de côté, après recentrage face à l'écran, tourner la tête à droite donne un lacet positif sans roulis ni tangage parasites.
+
+### Sortie OpenTrack (phase 6)
+- [ ] `cargo run -p output --example receive` dans un terminal, puis « Envoyer la pose » vers `127.0.0.1:4242` : ≈ 30 paquets/s, valeurs égales à la colonne « Sortie ».
+- [ ] Le panneau affiche « OpenTrack UDP → 127.0.0.1:4242 : 30 paquets/s ». En masquant le visage, le débit tombe à 0.
+- [ ] Une adresse invalide affiche une erreur sans figer la vidéo.
+- [ ] Les cases « Inverser » changent le signe des valeurs reçues.
+- [ ] Réglages de sortie conservés après « Enregistrer le profil » et un redémarrage.
+- [ ] **Sur PC** : OpenTrack, entrée « UDP over network » (port 4242) : les 6 axes bougent dans l'aperçu d'OpenTrack.

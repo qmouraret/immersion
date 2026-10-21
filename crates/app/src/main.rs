@@ -3,6 +3,7 @@
 mod bench;
 mod calibration;
 mod camera_view;
+mod output_panel;
 mod pipeline;
 mod profile;
 mod tuning;
@@ -22,9 +23,7 @@ fn main() -> anyhow::Result<()> {
 
     capture::ensure_permission().context("autorisation caméra")?;
 
-    // Dossier des modèles ONNX (`scripts/fetch_models.sh`), relatif au dossier courant.
-    let models_dir =
-        std::env::var_os("IMMERSION_MODELS").map_or_else(|| PathBuf::from("models"), PathBuf::from);
+    let models_dir = models_dir();
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -41,4 +40,22 @@ fn main() -> anyhow::Result<()> {
         Box::new(|_cc| Ok(Box::new(camera_view::CameraView::new(models_dir)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Dossier des modèles ONNX (`scripts/fetch_models.sh`) : `IMMERSION_MODELS`,
+/// sinon `models/` dans le dossier courant (développement avec `cargo run`),
+/// sinon `models/` à côté de l'exécutable (application installée, Windows).
+fn models_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("IMMERSION_MODELS") {
+        return PathBuf::from(dir);
+    }
+    let local = PathBuf::from("models");
+    if local.exists() {
+        return local;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("models")))
+        .filter(|dir| dir.exists())
+        .unwrap_or(local)
 }

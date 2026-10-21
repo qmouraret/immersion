@@ -3,6 +3,11 @@
 Head tracking par webcam pour Microsoft Flight Simulator 2024, écrit en Rust.
 Le cahier des charges complet est dans [PROMPT.md](PROMPT.md).
 
+[![Windows](../../actions/workflows/windows.yml/badge.svg)](../../actions/workflows/windows.yml)
+
+Licence : MIT (voir [LICENSE](LICENSE)). Les modèles et le visage de référence viennent de Google MediaPipe,
+sous Apache-2.0 (voir [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) et `models/NOTICE.txt`).
+
 Pour contribuer ou reprendre le code (architecture, conventions, règles d'implémentation) :
 **[AGENTS.md](AGENTS.md)**. Voir aussi [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) et
 [docs/TESTS.md](docs/TESTS.md).
@@ -381,3 +386,71 @@ décalage maximal vu pendant l'étalonnage.
 
 1. Ajouter à l'étape 1 une saisie manuelle du FOV (fiche technique de la webcam) à la place de la mesure.
 2. Proposer une liste des profils enregistrés, avec un bouton pour en supprimer un.
+
+## Phase 6 — Envoi vers OpenTrack et compilation Windows
+
+### Principe
+
+```
+Immersion ──UDP (6 × f64, port 4242)──▶ OpenTrack (« UDP over network »)
+                                           └─▶ sortie freetrack / TrackIR ─▶ MSFS 2024
+```
+
+OpenTrack sert de relais : il reçoit notre pose et la présente au simulateur comme un TrackIR. Le format a
+été vérifié dans le code source d'OpenTrack : 48 octets, `[TX, TY, TZ, lacet, tangage, roulis]`, en cm et en
+degrés.
+
+### Essayer sur le Mac, sans OpenTrack
+
+```bash
+cargo run -p output --example receive        # terminal 1 : récepteur de diagnostic
+cargo run --bin immersion                     # terminal 2 : panneau « Sortie », cocher « Envoyer la pose »
+```
+
+Le récepteur affiche environ 30 paquets/s, avec les mêmes valeurs que la colonne « Sortie ».
+
+### Avec un PC Windows
+
+- **Tout sur le PC** : adresse `127.0.0.1`, port `4242`.
+- **Immersion sur le Mac, OpenTrack sur le PC** : adresse IP du PC (`ipconfig` sous Windows), port `4242`.
+  Autoriser OpenTrack à recevoir de l'UDP dans le pare-feu Windows.
+- Dans OpenTrack : **Entrée** « UDP over network » (port 4242). Si un axe part à l'envers, cocher
+  « Inverser » dans notre panneau, ou utiliser les options de sortie d'OpenTrack.
+
+### Compiler sous Windows
+
+1. Installer Rust (rustup, chaîne MSVC) et les **Build Tools C++ de Visual Studio**, nécessaires au
+   décodeur MJPEG (C) utilisé par nokhwa.
+2. Dans le dossier du dépôt (PowerShell) :
+   ```powershell
+   .\scripts\fetch_models.ps1
+   cargo run --release --bin immersion
+   ```
+3. Pour distribuer l'application : copier `target\release\immersion.exe` avec un dossier `models\` à côté.
+   L'application cherche les modèles là aussi.
+
+Depuis le Mac, `cargo check --target x86_64-pc-windows-msvc` vérifie tout le code sauf `mozjpeg-sys`, qui
+demande le compilateur C de Microsoft (voir AGENTS.md § 7).
+
+### Concepts Rust de cette phase
+
+| Concept | Où le voir |
+|---|---|
+| Trait objet `Box<dyn PoseSink>` (+ `Send`) : plusieurs destinations possibles, choisies à l'exécution | `output::PoseSink` |
+| `UdpSocket` non bloquant, `ErrorKind::WouldBlock` | `OpenTrackUdp::send` |
+| Octets d'un nombre : `f64::to_le_bytes` / `from_le_bytes`, `as_chunks_mut::<8>()` | `opentrack::encode` / `decode` |
+| `ToSocketAddrs` (et son coût caché : le DNS) | `OpenTrackUdp::new` |
+| Thread éphémère + canal pour un appel bloquant | `PipelineCommand::SetOutput` |
+| Compilation croisée : `rustup target add`, `cargo check --target` | ci-dessus |
+
+### Exercices facultatifs
+
+1. Ajouter un second `PoseSink` qui écrit la pose dans un fichier CSV (enregistrement côté sortie).
+2. Ajouter au récepteur une option `--csv`, pour enregistrer les paquets reçus.
+
+### Exécutable Windows sans rien installer (GitHub Actions)
+
+À chaque push sur `main`, le workflow `.github/workflows/windows.yml` compile et teste le projet sur une
+machine Windows de GitHub, puis produit `immersion-windows-x64`, un `.zip` qui contient `immersion.exe` et
+`models/`. Il se télécharge dans l'onglet **Actions** du dépôt, en bas de la page d'une exécution. Le bouton
+**Run workflow** relance le workflow sans pousser de code.

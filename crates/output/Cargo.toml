@@ -1,0 +1,11 @@
+[package]
+name = "output"
+description = "Envoi de la pose vers un simulateur (UDP OpenTrack, plus tard TrackIR)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracker-core.workspace = true
+thiserror.workspace = true
+serde.workspace = true

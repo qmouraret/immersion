@@ -1,0 +1,54 @@
+# Compilation, tests et paquet Windows à chaque push sur main (ou à la demande).
+# Le .zip produit (immersion.exe + models/) se télécharge depuis l'onglet
+# « Actions » de GitHub, en bas de la page de l'exécution.
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # bouton « Run workflow » dans l'onglet Actions
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Garde target/ et le registre cargo entre deux exécutions (bien plus rapide).
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Modèles ONNX
+        shell: pwsh
+        run: ./scripts/fetch_models.ps1
+
+      - name: Mise en forme
+        run: cargo fmt --all --check
+
+      # -D warnings : un avertissement fait échouer le workflow (règle 16 d'AGENTS.md).
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Les tests matériels (caméra) sont marqués #[ignore] : ils ne tournent pas ici.
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Compilation release
+        run: cargo build --release --bin immersion
+
+      - name: Paquet
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/immersion/models | Out-Null
+          Copy-Item target/release/immersion.exe dist/immersion/
+          Copy-Item models/* dist/immersion/models/
+          Copy-Item LICENSE, README.md dist/immersion/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: immersion-windows-x64
+          path: dist/immersion
