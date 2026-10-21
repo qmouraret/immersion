@@ -59,6 +59,16 @@ pub struct OpenTrackUdp {
 impl OpenTrackUdp {
     /// Prépare l'envoi vers `host:port` (nom ou adresse IP).
     pub fn new(host: &str, port: u16, invert: [bool; 6]) -> Result<Self, OutputError> {
+        // Adresse vide refusée explicitement : macOS la rejette, mais Windows
+        // (`getaddrinfo`) la résout en une adresse locale, et l'on enverrait sans
+        // le savoir. Même comportement partout.
+        let host = host.trim();
+        if host.is_empty() {
+            return Err(OutputError::Address(
+                format!(":{port}"),
+                "adresse vide".into(),
+            ));
+        }
         let target = (host, port)
             .to_socket_addrs()
             .map_err(|e| OutputError::Address(format!("{host}:{port}"), e.to_string()))?
@@ -181,11 +191,16 @@ mod tests {
     }
 
     #[test]
-    fn adresse_invalide() {
-        // Adresse vide : rejetée sans requête DNS (un nom invalide peut prendre 5 s).
-        assert!(matches!(
-            OpenTrackUdp::new("", 4242, [false; 6]),
-            Err(OutputError::Address(..))
-        ));
+    fn adresse_vide_refusee_sur_tous_les_os() {
+        // Refusée avant toute résolution : pas de requête DNS (un nom invalide
+        // peut prendre 5 s), et pas de différence entre macOS et Windows, qui
+        // résout « » en adresse locale (constaté sur le runner GitHub).
+        for host in ["", "   "] {
+            let err = OpenTrackUdp::new(host, 4242, [false; 6])
+                .err()
+                .expect("doit échouer");
+            assert!(matches!(err, OutputError::Address(..)));
+            assert!(err.to_string().contains("adresse vide"));
+        }
     }
 }

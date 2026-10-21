@@ -312,6 +312,7 @@ Les tableaux d'axes suivent toujours l'ordre `[lacet, tangage, roulis, x, y, z]`
 | La vue saute quand on cligne des yeux, ouvre la bouche ou lève les sourcils | le modèle décale tout le maillage : tangage +1,5° (yeux fermés) à +4,4° (bouche), Z jusqu'à −7 cm (la bouche ouverte agrandit le visage). Ni le choix des points ni le gel de la pose ne règlent le tangage (mesuré avec `eval_pose` sur une session de grimaces) | distance calculée sur `UPPER_POINTS` (Z au repos ÷ 3,9) ; tangage : zone morte 2° et courbe 25° → 60° (÷ 5) ; lacet : zone morte 1°. À venir (phase 5) : correction apprise selon l'expression |
 | La sortie fige le suivi quelques secondes | un nom d'hôte invalide passe par le DNS (≈ 5 s avant l'échec) | connexion sur un thread éphémère (`PipelineCommand::SetOutput`) ; préférer une adresse IP |
 | `cargo check --target x86_64-pc-windows-msvc` échoue sur `mozjpeg-sys` depuis macOS | bibliothèque C (MJPEG de nokhwa), qui demande le compilateur MSVC | sur Windows, installer les Build Tools C++ de Visual Studio. Pour vérifier le reste depuis le Mac : `default-features = false` sur nokhwa, temporairement |
+| Test `adresse_invalide` vert sur macOS, rouge sous Windows (CI) | Windows (`getaddrinfo`) résout l'adresse vide `""` en adresse locale, alors que macOS la rejette | adresse vide (ou blanche) refusée explicitement avant toute résolution (`OpenTrackUdp::new`) ; CI en `--no-fail-fast` pour voir tous les échecs |
 | `cargo` introuvable depuis un shell d'agent | `~/.cargo/env` non chargé | `source "$HOME/.cargo/env"` |
 
 ---
