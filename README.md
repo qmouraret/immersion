@@ -10,7 +10,7 @@ sous Apache-2.0 (voir [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) et `models/NO
 
 Pour contribuer ou reprendre le code (architecture, conventions, règles d'implémentation) :
 **[AGENTS.md](AGENTS.md)**. Voir aussi [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) et
-[docs/TESTS.md](docs/TESTS.md).
+[docs/TESTS.md](docs/TESTS.md). Pour reprendre le travail : [docs/REPRISE.md](docs/REPRISE.md) ; poste Windows : [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## Structure
 

@@ -6,6 +6,8 @@ d'origine est dans [PROMPT.md](PROMPT.md).
 
 - Dépendances, licences et modèles : [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)
 - Stratégie de test, couverture et tests manuels : [docs/TESTS.md](docs/TESTS.md)
+- **Où en est le projet, ce qui reste à faire** : [docs/REPRISE.md](docs/REPRISE.md)
+- Poste de développement Windows : [docs/WINDOWS.md](docs/WINDOWS.md)
 
 ---
 
